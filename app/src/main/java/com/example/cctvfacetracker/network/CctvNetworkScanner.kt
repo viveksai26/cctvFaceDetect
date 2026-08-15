@@ -17,7 +17,7 @@ data class DiscoveredDevice(
     val openPorts: Set<Int>,
 ) {
     val isLikelyCctvOrNvr: Boolean
-        get() = openPorts.any { it in CCTV_SIGNATURE_PORTS }
+        get() = openPorts.any { it in CctvNetworkScanner.CCTV_SIGNATURE_PORTS }
 }
 
 /**
@@ -77,11 +77,11 @@ class CctvNetworkScanner {
 
     companion object {
         val CCTV_PORTS = listOf(80, 554, 8000, 8080, 8554, 8899, 5000, 37777)
-        private val CCTV_SIGNATURE_PORTS = setOf(554, 8000, 8554, 8899, 5000, 37777)
+        val CCTV_SIGNATURE_PORTS = setOf(554, 8000, 8554, 8899, 5000, 37777)
         private const val CONNECT_TIMEOUT_MS = 250
         private const val MAX_CONCURRENT_HOSTS = 32
         const val MAX_HOSTS = 1_024
-        private const val MIN_SUPPORTED_PREFIX = 16
+        private const val MIN_SUPPORTED_PREFIX = 8
         private const val IPV4_MASK = 0xffff_ffffL
     }
 }
