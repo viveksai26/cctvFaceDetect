@@ -4,36 +4,35 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.example.cctvfacetracker.network.CctvNetworkScanner
+import com.example.cctvfacetracker.network.DiscoveredDevice
+
+private enum class AppScreen { DISCOVERY, CREDENTIALS, VALIDATING, CAMERAS, VIEWER }
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -43,46 +42,212 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
+                var screen by remember { mutableStateOf(AppScreen.DISCOVERY) }
+                var selectedDevice by remember { mutableStateOf<DiscoveredDevice?>(null) }
+                var editingConnection by remember { mutableStateOf<CpPlusDvrConnection?>(null) }
+                var connection by remember { mutableStateOf<CpPlusDvrConnection?>(null) }
+                var availableChannels by remember { mutableStateOf<List<Int>>(emptyList()) }
+                var selectedChannel by remember { mutableStateOf<Int?>(null) }
+                
+                // For simplicity, just auto-connect to the first saved DVR if present,
+                // or let the user choose from the list.
+                val firstSaved = state.savedConnections.firstOrNull()
+                LaunchedEffect(firstSaved) {
+                    if (connection == null && firstSaved != null) {
+                        connection = CpPlusDvrConnection(
+                            firstSaved.host,
+                            firstSaved.rtspPort,
+                            firstSaved.username,
+                            firstSaved.password,
+                            firstSaved.numCameras
+                        )
+                        availableChannels = (1..firstSaved.numCameras).toList()
+                        screen = AppScreen.CAMERAS
+                    }
+                }
+
+
                 CctvTrackerScreen(
                     state = state,
-                    onRefreshNetwork = viewModel::refreshNetwork,
+                    screen = screen,
+                    selectedDevice = selectedDevice,
+                    editingConnection = editingConnection,
+                    connection = connection,
+                    selectedChannel = selectedChannel,
+                    availableChannels = connection?.let { (1..it.numCameras).toList() } ?: emptyList(),
                     onScan = viewModel::startScan,
                     onCancel = viewModel::cancelScan,
+                    onDeviceSelected = { device ->
+                        selectedDevice = device
+                        editingConnection = null
+                        screen = AppScreen.CREDENTIALS
+                    },
+                    onManualAdd = {
+                        selectedDevice = null
+                        editingConnection = null
+                        screen = AppScreen.CREDENTIALS
+                    },
+                    onCredentialsSubmitted = { dvrConnection ->
+                        connection = dvrConnection
+                        screen = AppScreen.VALIDATING
+                    },
+                    onCredentialsValidated = { channels ->
+                        connection?.let { 
+                            viewModel.saveConnection(it)
+                            availableChannels = (1..it.numCameras).toList()
+                        }
+                        screen = AppScreen.CAMERAS
+                    },
+                    onCredentialFailure = { screen = AppScreen.CREDENTIALS },
+                    onDeleteSavedConnection = viewModel::deleteConnection,
+                    onViewSavedConnection = { conn ->
+                        connection = conn
+                        availableChannels = (1..conn.numCameras).toList()
+                        screen = AppScreen.CAMERAS
+                    },
+                    onEditSavedConnection = { conn ->
+                        editingConnection = conn
+                        screen = AppScreen.CREDENTIALS
+                    },
+                    onChannelSelected = { channel ->
+                        selectedChannel = channel
+                        screen = AppScreen.VIEWER
+                    },
+                    onBack = {
+                        screen = when (screen) {
+                            AppScreen.VIEWER -> AppScreen.CAMERAS
+                            AppScreen.CAMERAS, AppScreen.VALIDATING, AppScreen.CREDENTIALS -> AppScreen.DISCOVERY
+                            AppScreen.DISCOVERY -> AppScreen.DISCOVERY
+                        }
+                    },
                 )
             }
         }
     }
 }
-
 @Composable
 private fun CctvTrackerScreen(
     state: ScannerUiState,
-    onRefreshNetwork: () -> Unit,
+    screen: AppScreen,
+    selectedDevice: DiscoveredDevice?,
+    editingConnection: CpPlusDvrConnection?,
+    connection: CpPlusDvrConnection?,
+    selectedChannel: Int?,
+    availableChannels: List<Int>,
     onScan: () -> Unit,
     onCancel: () -> Unit,
+    onDeviceSelected: (DiscoveredDevice) -> Unit,
+    onManualAdd: () -> Unit,
+    onCredentialsSubmitted: (CpPlusDvrConnection) -> Unit,
+    onCredentialsValidated: (List<Int>) -> Unit,
+    onCredentialFailure: () -> Unit,
+    onDeleteSavedConnection: (String) -> Unit,
+    onViewSavedConnection: (CpPlusDvrConnection) -> Unit,
+    onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
+    onChannelSelected: (Int) -> Unit,
+    onBack: () -> Unit,
 ) {
-    var username by rememberSaveable { mutableStateOf("") }
+    when (screen) {
+        AppScreen.DISCOVERY -> DiscoveryScreen(state, onScan, onCancel, onDeviceSelected, onManualAdd, onDeleteSavedConnection, onViewSavedConnection, onEditSavedConnection)
+        AppScreen.CREDENTIALS -> CredentialsScreen(selectedDevice, editingConnection, onCredentialsSubmitted, onBack)
+        AppScreen.VALIDATING -> connection?.let { CredentialValidationScreen(it, onCredentialsValidated, onCredentialFailure) }
+        AppScreen.CAMERAS -> connection?.let { CameraListScreen(it, availableChannels, onChannelSelected, onBack) }
+        AppScreen.VIEWER -> connection?.let { dvr -> selectedChannel?.let { CctvViewerScreen(dvr, it, onBack) } }
+    }
+}
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DiscoveryScreen(
+    state: ScannerUiState,
+    onScan: () -> Unit,
+    onCancel: () -> Unit,
+    onDeviceSelected: (DiscoveredDevice) -> Unit,
+    onManualAdd: () -> Unit,
+    onDeleteSavedConnection: (String) -> Unit,
+    onViewSavedConnection: (CpPlusDvrConnection) -> Unit,
+    onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
+) {
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("CCTV Viewer And Tracker") }) }
+    ) { paddingValues ->
+        LazyColumn(
+            modifier = Modifier.fillMaxSize().padding(paddingValues).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item { Text(state.network?.cidr ?: "No active Wi-Fi IPv4 network", style = MaterialTheme.typography.bodyMedium) }
+            
+            if (state.savedConnections.isNotEmpty()) {
+                item { Text("Saved DVRs", style = MaterialTheme.typography.titleLarge) }
+                items(state.savedConnections, key = { it.id }) { saved ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(saved.host, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { onViewSavedConnection(CpPlusDvrConnection(saved.host, saved.rtspPort, saved.username, saved.password, saved.numCameras)) }) { Text("View") }
+                            TextButton(onClick = { onEditSavedConnection(CpPlusDvrConnection(saved.host, saved.rtspPort, saved.username, saved.password, saved.numCameras)) }) { Text("Edit") }
+                            TextButton(onClick = { onDeleteSavedConnection(saved.id) }) { Text("Delete") }
+                        }
+                    }
+                }
+            }
+            
+            item {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onScan, enabled = !state.isScanning && state.network != null, modifier = Modifier.weight(1f)) { 
+                        Text("Scan LAN Cameras")
+                    }
+                    Button(onClick = onManualAdd, modifier = Modifier.weight(1f)) { 
+                        Text("Manual Add via IP")
+                    }
+                }
+                if (state.isScanning) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Scanning...")
+                        Spacer(Modifier.width(8.dp))
+                        TextButton(onClick = onCancel) { Text("Cancel") }
+                    }
+                    Text("Checked ${state.scannedHosts} hosts", modifier = Modifier.padding(top = 8.dp))
+                }
+                state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
+            }
+            // ... (rest)
+        }
+    }
+}
+
+@Composable
+private fun CredentialsScreen(
+    device: DiscoveredDevice?,
+    initialConnection: CpPlusDvrConnection?,
+    onCredentialsSubmitted: (CpPlusDvrConnection) -> Unit,
+    onBack: () -> Unit,
+) {
+    var dvrIpAddress by remember(device?.address, initialConnection) { mutableStateOf(device?.address ?: initialConnection?.host ?: "") }
+    var username by remember(initialConnection) { mutableStateOf(initialConnection?.username ?: "") }
     // Credentials stay only in the current in-memory UI session.
-    var password by remember { mutableStateOf("") }
+    var password by remember(initialConnection) { mutableStateOf(initialConnection?.password ?: "") }
+    var rtspPort by remember(initialConnection) { mutableStateOf((initialConnection?.rtspPort ?: 554).toString()) }
+    var numCameras by remember(initialConnection) { mutableStateOf((initialConnection?.numCameras ?: 8).toString()) }
+    var error by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
+        modifier = Modifier.fillMaxSize().padding(50.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Text("CCTV Face Tracker", style = MaterialTheme.typography.headlineMedium)
-            Text("Phase 1 · Local network discovery", style = MaterialTheme.typography.bodyMedium)
+            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to devices", style = MaterialTheme.typography.titleMedium) }
+            Spacer(Modifier.height(16.dp))
+            Text(if (device != null) "Connect to ${device.address}" else "Manual Connection", style = MaterialTheme.typography.headlineSmall)
+            Text("Enter your CP Plus DVR credentials. We will verify Camera 1 before listing all cameras.")
         }
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("Local Wi-Fi network", style = MaterialTheme.typography.titleMedium)
-                    Text(state.network?.cidr ?: "No active Wi-Fi IPv4 network", modifier = Modifier.padding(top = 4.dp))
-                    TextButton(onClick = onRefreshNetwork) { Text("Refresh network") }
-                }
-            }
-        }
-        item {
+            OutlinedTextField(
+                value = dvrIpAddress,
+                onValueChange = { dvrIpAddress = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("DVR IP address") },
+                singleLine = true,
+            )
+            Spacer(Modifier.height(8.dp))
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },
@@ -96,35 +261,44 @@ private fun CctvTrackerScreen(
                 onValueChange = { password = it },
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("CCTV password") },
+                supportingText = { Text("Enter the password itself, e.g. admin@123.") },
                 visualTransformation = if (password.isEmpty()) VisualTransformation.None else PasswordVisualTransformation(),
+                singleLine = true,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = rtspPort,
+                onValueChange = { rtspPort = it.filter(Char::isDigit) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("RTSP port") },
+                supportingText = { Text("CP Plus default: 554") },
+                singleLine = true,
+            )
+            Spacer(Modifier.height(8.dp))
+            OutlinedTextField(
+                value = numCameras,
+                onValueChange = { numCameras = it.filter(Char::isDigit) },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Number of cameras") },
                 singleLine = true,
             )
         }
         item {
-            Row {
-                Button(onClick = onScan, enabled = !state.isScanning && state.network != null) { Text("Scan LAN") }
-                Spacer(Modifier.width(8.dp))
-                if (state.isScanning) {
-                    TextButton(onClick = onCancel) { Text("Cancel") }
-                    Spacer(Modifier.width(12.dp))
-                    CircularProgressIndicator(modifier = Modifier.height(24.dp).width(24.dp), strokeWidth = 2.dp)
+            Button(onClick = {
+                runCatching {
+                    require(dvrIpAddress.isNotBlank()) { "Enter the DVR IP address." }
+                    require(username.isNotBlank()) { "Enter a username." }
+                    require(password.isNotBlank()) { "Enter a password." }
+                    val port = rtspPort.toIntOrNull() ?: error("Enter a valid RTSP port.")
+                    require(port in 1..65535) { "Enter a valid RTSP port." }
+                    val num = numCameras.toIntOrNull() ?: error("Enter a valid number of cameras.")
+                    require(num in 1..64) { "Enter a valid number of cameras." }
+                    CpPlusDvrConnection(dvrIpAddress.trim(), port, username, password, num)
                 }
-            }
-            if (state.isScanning) Text("Checked ${state.scannedHosts} hosts", modifier = Modifier.padding(top = 8.dp))
-            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
-        }
-        item {
-            Text("Discovered devices (${state.devices.size})", style = MaterialTheme.typography.titleLarge)
-            Text("Ports are checked only within this Wi-Fi subnet. Up to ${CctvNetworkScanner.MAX_HOSTS} hosts are scanned.")
-        }
-        items(state.devices, key = { it.address }) { device ->
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(device.address, style = MaterialTheme.typography.titleMedium)
-                    Text("Open ports: ${device.openPorts.joinToString()}")
-                    Text(if (device.isLikelyCctvOrNvr) "Likely CCTV / NVR" else "Possible web-managed device")
-                }
-            }
+                    .onSuccess(onCredentialsSubmitted)
+                    .onFailure { error = it.message }
+            }, modifier = Modifier.fillMaxWidth()) { Text("Verify and show cameras") }
+            error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp)) }
         }
     }
 }

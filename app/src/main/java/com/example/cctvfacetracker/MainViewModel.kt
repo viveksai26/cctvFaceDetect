@@ -19,13 +19,15 @@ data class ScannerUiState(
     val isScanning: Boolean = false,
     val scannedHosts: Int = 0,
     val devices: List<DiscoveredDevice> = emptyList(),
+    val savedConnections: List<SavedDvrCredentials> = emptyList(),
     val error: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val networkProvider = LocalNetworkInfoProvider(application)
     private val scanner = CctvNetworkScanner()
-    private val _uiState = MutableStateFlow(ScannerUiState())
+    private val credentialStore = DvrCredentialStore(application)
+    private val _uiState = MutableStateFlow(ScannerUiState(savedConnections = credentialStore.loadAll()))
     val uiState = _uiState.asStateFlow()
     private var scanJob: Job? = null
 
@@ -48,7 +50,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         scanJob?.cancel()
         scanJob = viewModelScope.launch {
-            _uiState.value = ScannerUiState(network = network, isScanning = true)
+            _uiState.update { it.copy(isScanning = true, scannedHosts = 0, devices = emptyList()) }
             scanner.scan(network)
                 .catch { error -> _uiState.update { it.copy(isScanning = false, error = error.message ?: "Scan failed.") } }
                 .collect { device ->
@@ -62,6 +64,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }.also { job ->
             job.invokeOnCompletion { _uiState.update { it.copy(isScanning = false) } }
         }
+    }
+
+    fun saveConnection(connection: CpPlusDvrConnection) {
+        credentialStore.save(connection)
+        _uiState.update { it.copy(savedConnections = credentialStore.loadAll()) }
+    }
+
+    fun deleteConnection(id: String) {
+        credentialStore.delete(id)
+        _uiState.update { it.copy(savedConnections = credentialStore.loadAll()) }
     }
 
     fun cancelScan() {
