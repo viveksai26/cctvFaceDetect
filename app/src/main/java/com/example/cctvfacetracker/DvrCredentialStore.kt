@@ -16,9 +16,7 @@ data class SavedDvrCredentials(
     val username: String,
     val password: String,
     val rtspPort: Int,
-    val numCameras: Int,
-    val telegramToken: String = "",
-    val telegramChatId: String = ""
+    val numCameras: Int
 )
 
 /** Stores DVR credentials encrypted with a device-bound Android Keystore key. */
@@ -36,8 +34,6 @@ class DvrCredentialStore(context: Context) {
                     password = decrypt(preferences.getString("password_$id", "") ?: ""),
                     rtspPort = preferences.getInt("rtsp_port_$id", 554),
                     numCameras = preferences.getInt("num_cameras_$id", 8),
-                    telegramToken = decrypt(preferences.getString("telegram_token_$id", "") ?: ""),
-                    telegramChatId = decrypt(preferences.getString("telegram_chat_id_$id", "") ?: ""),
                 )
             }.getOrNull()
         }
@@ -54,8 +50,6 @@ class DvrCredentialStore(context: Context) {
             .putString("password_$id", encrypt(connection.password))
             .putInt("rtsp_port_$id", connection.rtspPort)
             .putInt("num_cameras_$id", connection.numCameras)
-            .putString("telegram_token_$id", encrypt(connection.telegramToken))
-            .putString("telegram_chat_id_$id", encrypt(connection.telegramChatId))
             .apply()
     }
 
@@ -68,8 +62,6 @@ class DvrCredentialStore(context: Context) {
             .remove("username_$id")
             .remove("password_$id")
             .remove("rtsp_port_$id")
-            .remove("telegram_token_$id")
-            .remove("telegram_chat_id_$id")
             .apply()
     }
 
