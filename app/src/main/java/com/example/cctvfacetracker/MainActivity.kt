@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.cctvfacetracker.network.DiscoveredDevice
 
-private enum class AppScreen { DISCOVERY, CREDENTIALS, VALIDATING, CAMERAS, VIEWER }
+private enum class AppScreen { DISCOVERY, CREDENTIALS, VALIDATING, CAMERAS, VIEWER, TRACK_SELECT, TRACKING }
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -48,6 +48,9 @@ class MainActivity : ComponentActivity() {
                 var connection by remember { mutableStateOf<CpPlusDvrConnection?>(null) }
                 var availableChannels by remember { mutableStateOf<List<Int>>(emptyList()) }
                 var selectedChannel by remember { mutableStateOf<Int?>(null) }
+                var selectedTrackChannels by remember { mutableStateOf<Set<Int>>(emptySet()) }
+                var telegramToken by remember { mutableStateOf("") }
+                var telegramChatId by remember { mutableStateOf("") }
                 
                 // For simplicity, just auto-connect to the first saved DVR if present,
                 // or let the user choose from the list.
@@ -62,7 +65,8 @@ class MainActivity : ComponentActivity() {
                             firstSaved.numCameras
                         )
                         availableChannels = (1..firstSaved.numCameras).toList()
-                        screen = AppScreen.CAMERAS
+                        // Don't auto-navigate to CAMERAS if we just want to stay in DISCOVERY
+                        // screen = AppScreen.CAMERAS
                     }
                 }
 
@@ -75,6 +79,9 @@ class MainActivity : ComponentActivity() {
                     connection = connection,
                     selectedChannel = selectedChannel,
                     availableChannels = connection?.let { (1..it.numCameras).toList() } ?: emptyList(),
+                    selectedTrackChannels = selectedTrackChannels,
+                    telegramToken = telegramToken,
+                    telegramChatId = telegramChatId,
                     onScan = viewModel::startScan,
                     onCancel = viewModel::cancelScan,
                     onDeviceSelected = { device ->
@@ -105,6 +112,12 @@ class MainActivity : ComponentActivity() {
                         availableChannels = (1..conn.numCameras).toList()
                         screen = AppScreen.CAMERAS
                     },
+                    onTrackSavedConnection = { conn ->
+                        connection = conn
+                        availableChannels = (1..conn.numCameras).toList()
+                        selectedTrackChannels = emptySet()
+                        screen = AppScreen.TRACK_SELECT
+                    },
                     onEditSavedConnection = { conn ->
                         editingConnection = conn
                         screen = AppScreen.CREDENTIALS
@@ -113,8 +126,22 @@ class MainActivity : ComponentActivity() {
                         selectedChannel = channel
                         screen = AppScreen.VIEWER
                     },
+                    onToggleTrackChannel = { channel ->
+                        selectedTrackChannels = if (selectedTrackChannels.contains(channel)) {
+                            selectedTrackChannels - channel
+                        } else {
+                            selectedTrackChannels + channel
+                        }
+                    },
+                    onStartTracking = { token, chatId ->
+                        telegramToken = token
+                        telegramChatId = chatId
+                        screen = AppScreen.TRACKING
+                    },
                     onBack = {
                         screen = when (screen) {
+                            AppScreen.TRACKING -> AppScreen.TRACK_SELECT
+                            AppScreen.TRACK_SELECT -> AppScreen.DISCOVERY
                             AppScreen.VIEWER -> AppScreen.CAMERAS
                             AppScreen.CAMERAS, AppScreen.VALIDATING, AppScreen.CREDENTIALS -> AppScreen.DISCOVERY
                             AppScreen.DISCOVERY -> AppScreen.DISCOVERY
@@ -134,6 +161,9 @@ private fun CctvTrackerScreen(
     connection: CpPlusDvrConnection?,
     selectedChannel: Int?,
     availableChannels: List<Int>,
+    selectedTrackChannels: Set<Int>,
+    telegramToken: String,
+    telegramChatId: String,
     onScan: () -> Unit,
     onCancel: () -> Unit,
     onDeviceSelected: (DiscoveredDevice) -> Unit,
@@ -143,16 +173,21 @@ private fun CctvTrackerScreen(
     onCredentialFailure: () -> Unit,
     onDeleteSavedConnection: (String) -> Unit,
     onViewSavedConnection: (CpPlusDvrConnection) -> Unit,
+    onTrackSavedConnection: (CpPlusDvrConnection) -> Unit,
     onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
     onChannelSelected: (Int) -> Unit,
+    onToggleTrackChannel: (Int) -> Unit,
+    onStartTracking: (String, String) -> Unit,
     onBack: () -> Unit,
 ) {
     when (screen) {
-        AppScreen.DISCOVERY -> DiscoveryScreen(state, onScan, onCancel, onDeviceSelected, onManualAdd, onDeleteSavedConnection, onViewSavedConnection, onEditSavedConnection)
+        AppScreen.DISCOVERY -> DiscoveryScreen(state, onScan, onCancel, onDeviceSelected, onManualAdd, onDeleteSavedConnection, onViewSavedConnection, onTrackSavedConnection, onEditSavedConnection)
         AppScreen.CREDENTIALS -> CredentialsScreen(selectedDevice, editingConnection, onCredentialsSubmitted, onBack)
         AppScreen.VALIDATING -> connection?.let { CredentialValidationScreen(it, onCredentialsValidated, onCredentialFailure) }
         AppScreen.CAMERAS -> connection?.let { CameraListScreen(it, availableChannels, onChannelSelected, onBack) }
         AppScreen.VIEWER -> connection?.let { dvr -> selectedChannel?.let { CctvViewerScreen(dvr, it, onBack) } }
+        AppScreen.TRACK_SELECT -> connection?.let { TrackSelectScreen(it, availableChannels, selectedTrackChannels, onToggleTrackChannel, onStartTracking, onBack) }
+        AppScreen.TRACKING -> connection?.let { TrackingScreen(it, selectedTrackChannels, telegramToken, telegramChatId, onBack) }
     }
 }
 @OptIn(ExperimentalMaterial3Api::class)
@@ -165,6 +200,7 @@ private fun DiscoveryScreen(
     onManualAdd: () -> Unit,
     onDeleteSavedConnection: (String) -> Unit,
     onViewSavedConnection: (CpPlusDvrConnection) -> Unit,
+    onTrackSavedConnection: (CpPlusDvrConnection) -> Unit,
     onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
 ) {
     Scaffold(
@@ -183,6 +219,7 @@ private fun DiscoveryScreen(
                         Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text(saved.host, modifier = Modifier.weight(1f))
                             TextButton(onClick = { onViewSavedConnection(CpPlusDvrConnection(saved.host, saved.rtspPort, saved.username, saved.password, saved.numCameras)) }) { Text("View") }
+                            TextButton(onClick = { onTrackSavedConnection(CpPlusDvrConnection(saved.host, saved.rtspPort, saved.username, saved.password, saved.numCameras)) }) { Text("Track") }
                             TextButton(onClick = { onEditSavedConnection(CpPlusDvrConnection(saved.host, saved.rtspPort, saved.username, saved.password, saved.numCameras)) }) { Text("Edit") }
                             TextButton(onClick = { onDeleteSavedConnection(saved.id) }) { Text("Delete") }
                         }
