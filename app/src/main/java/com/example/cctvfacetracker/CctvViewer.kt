@@ -3,8 +3,11 @@ package com.example.cctvfacetracker
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,10 +36,15 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.net.InetSocketAddress
+import java.net.Socket
+import kotlin.coroutines.resume
 
-data class CpPlusDvrConnection(val host: String, val rtspPort: Int, val username: String, val password: String) {
+data class CpPlusDvrConnection(val host: String, val rtspPort: Int, val username: String, val password: String, val numCameras: Int) {
     fun channelUri(channel: Int): String {
-        require(channel in 1..8)
+        require(channel in 1..numCameras)
         return Uri.Builder().scheme("rtsp")
             .encodedAuthority("${Uri.encode(Uri.decode(username))}:${Uri.encode(Uri.decode(password))}@$host:$rtspPort")
             .appendPath("cam").appendPath("realmonitor")
@@ -53,35 +61,28 @@ data class CpPlusDvrConnection(val host: String, val rtspPort: Int, val username
 }
 
 @Composable
-fun CredentialValidationScreen(connection: CpPlusDvrConnection, onVerified: () -> Unit, onFailed: () -> Unit) {
+fun CredentialValidationScreen(connection: CpPlusDvrConnection, onVerified: (List<Int>) -> Unit, onFailed: () -> Unit) {
     var error by remember { mutableStateOf<String?>(null) }
-    var completed by remember { mutableStateOf(false) }
-    val context = LocalContext.current
-    val player = remember(connection) { ExoPlayer.Builder(context).build() }
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == Player.STATE_READY && !completed) {
-                    completed = true
-                    onVerified()
+
+    LaunchedEffect(connection) {
+        withContext(Dispatchers.IO) {
+            try {
+                // Verify TCP connectivity to the RTSP port
+                val socket = Socket()
+                socket.connect(InetSocketAddress(connection.host, connection.rtspPort), 5000)
+                socket.close()
+                
+                withContext(Dispatchers.Main) {
+                    onVerified((1..connection.numCameras).toList())
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    error = "Failed to connect to DVR on port ${connection.rtspPort}: ${e.message}"
                 }
             }
-            override fun onPlayerError(playbackException: PlaybackException) {
-                completed = true
-                error = playbackException.message ?: "The DVR rejected the credentials or stream request."
-            }
-        }
-        player.addListener(listener)
-        player.setMediaSource(connection.channelMediaSource(1))
-        player.prepare()
-        onDispose { player.removeListener(listener); player.release() }
-    }
-    LaunchedEffect(connection) {
-        kotlinx.coroutines.delay(12_000)
-        if (!completed && error == null) {
-            error = "Timed out waiting for Camera 1. Check the DVR IP, RTSP port, and credentials."
         }
     }
+    
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -89,8 +90,7 @@ fun CredentialValidationScreen(connection: CpPlusDvrConnection, onVerified: () -
     ) {
         if (error == null) {
             CircularProgressIndicator(Modifier.size(36.dp))
-            Text("Checking CP Plus DVR credentials…")
-            Text("Verifying Camera 1", style = MaterialTheme.typography.bodyMedium)
+            Text("Verifying DVR connectivity...")
         } else {
             Text("Could not verify the DVR", style = MaterialTheme.typography.headlineSmall)
             Text(error!!, color = MaterialTheme.colorScheme.error)
@@ -100,18 +100,19 @@ fun CredentialValidationScreen(connection: CpPlusDvrConnection, onVerified: () -
 }
 
 @Composable
-fun CameraListScreen(connection: CpPlusDvrConnection, onChannelSelected: (Int) -> Unit, onBack: () -> Unit) {
-    LazyColumn(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+fun CameraListScreen(connection: CpPlusDvrConnection, availableChannels: List<Int>, onChannelSelected: (Int) -> Unit, onBack: () -> Unit) {
+    LazyColumn(Modifier.fillMaxSize().padding(50.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         item {
-            TextButton(onClick = onBack) { Text("Back to devices") }
+            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back to devices", style = MaterialTheme.typography.titleMedium) }
+            Spacer(Modifier.height(16.dp))
             Text("${connection.host} cameras", style = MaterialTheme.typography.headlineSmall)
-            Text("Credentials verified. Choose a camera to view live video.")
+            Text("Found ${availableChannels.size} active cameras.")
         }
-        items((1..8).toList()) { channel ->
-            Card(onClick = { onChannelSelected(channel) }, modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp)) {
-                    Text("Camera $channel", style = MaterialTheme.typography.titleMedium)
-                    Text("Open live view")
+        items(availableChannels) { channel ->
+            Card(onClick = { onChannelSelected(channel) }, modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp)) {
+                Column(Modifier.padding(24.dp)) {
+                    Text("Camera $channel", style = MaterialTheme.typography.titleLarge)
+                    Text("Open live view", style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }
@@ -135,8 +136,8 @@ fun CctvViewerScreen(connection: CpPlusDvrConnection, channel: Int, onBack: () -
         player.addListener(listener)
         onDispose { player.removeListener(listener); player.release() }
     }
-    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        TextButton(onClick = onBack) { Text("All cameras") }
+    Column(Modifier.fillMaxSize().padding(50.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("All cameras", style = MaterialTheme.typography.titleMedium) }
         Text("Camera $channel", style = MaterialTheme.typography.headlineSmall)
         AndroidView(factory = { PlayerView(it).apply { this.player = player } }, update = { it.player = player }, modifier = Modifier.fillMaxWidth().weight(1f))
         playbackError?.let { Text(it, color = MaterialTheme.colorScheme.error) }

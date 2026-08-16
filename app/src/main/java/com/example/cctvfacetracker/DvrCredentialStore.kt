@@ -10,26 +10,56 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-data class SavedDvrCredentials(val username: String, val password: String, val rtspPort: Int)
+data class SavedDvrCredentials(val id: String, val host: String, val username: String, val password: String, val rtspPort: Int, val numCameras: Int)
 
 /** Stores DVR credentials encrypted with a device-bound Android Keystore key. */
 class DvrCredentialStore(context: Context) {
     private val preferences = context.getSharedPreferences("dvr_credentials", Context.MODE_PRIVATE)
 
-    fun load(): SavedDvrCredentials? = runCatching {
-        SavedDvrCredentials(
-            username = decrypt(preferences.getString("username", null) ?: return null),
-            password = decrypt(preferences.getString("password", null) ?: return null),
-            rtspPort = preferences.getInt("rtsp_port", 554),
-        )
-    }.getOrNull()
+    fun loadAll(): List<SavedDvrCredentials> {
+        val ids = preferences.getStringSet("dvr_ids", emptySet()) ?: return emptyList()
+        return ids.mapNotNull { id ->
+            runCatching {
+                SavedDvrCredentials(
+                    id = id,
+                    host = decrypt(preferences.getString("host_$id", "") ?: ""),
+                    username = decrypt(preferences.getString("username_$id", "") ?: ""),
+                    password = decrypt(preferences.getString("password_$id", "") ?: ""),
+                    rtspPort = preferences.getInt("rtsp_port_$id", 554),
+                    numCameras = preferences.getInt("num_cameras_$id", 8),
+                )
+            }.getOrNull()
+        }
+    }
 
     fun save(connection: CpPlusDvrConnection) {
+        val id = connection.host.replace(".", "_")
+        val ids = preferences.getStringSet("dvr_ids", emptySet())?.toMutableSet() ?: mutableSetOf()
+        ids.add(id)
         preferences.edit()
-            .putString("username", encrypt(connection.username))
-            .putString("password", encrypt(connection.password))
-            .putInt("rtsp_port", connection.rtspPort)
+            .putStringSet("dvr_ids", ids)
+            .putString("host_$id", encrypt(connection.host))
+            .putString("username_$id", encrypt(connection.username))
+            .putString("password_$id", encrypt(connection.password))
+            .putInt("rtsp_port_$id", connection.rtspPort)
+            .putInt("num_cameras_$id", connection.numCameras)
             .apply()
+    }
+
+    fun delete(id: String) {
+        val ids = preferences.getStringSet("dvr_ids", emptySet())?.toMutableSet() ?: return
+        ids.remove(id)
+        preferences.edit()
+            .putStringSet("dvr_ids", ids)
+            .remove("host_$id")
+            .remove("username_$id")
+            .remove("password_$id")
+            .remove("rtsp_port_$id")
+            .apply()
+    }
+
+    fun clear() {
+        preferences.edit().clear().apply()
     }
 
     private fun encrypt(value: String): String {
