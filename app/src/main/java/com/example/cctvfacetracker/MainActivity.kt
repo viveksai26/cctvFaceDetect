@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
                 }
 
 
-                CctvTrackerScreen(
+CctvTrackerScreen(
                     state = state,
                     screen = screen,
                     selectedDevice = selectedDevice,
@@ -133,7 +133,7 @@ class MainActivity : ComponentActivity() {
                             selectedTrackChannels + channel
                         }
                     },
-                    onStartTracking = { token, chatId ->
+                    onStartTracking = { token, chatId, channels ->
                         telegramToken = token
                         telegramChatId = chatId
                         screen = AppScreen.TRACKING
@@ -177,7 +177,7 @@ private fun CctvTrackerScreen(
     onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
     onChannelSelected: (Int) -> Unit,
     onToggleTrackChannel: (Int) -> Unit,
-    onStartTracking: (String, String) -> Unit,
+    onStartTracking: (String, String, Set<Int>) -> Unit,
     onBack: () -> Unit,
 ) {
     when (screen) {
@@ -204,7 +204,7 @@ private fun DiscoveryScreen(
     onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
 ) {
     Scaffold(
-        topBar = { TopAppBar(title = { Text("CCTV Viewer And Tracker") }) }
+        topBar = { TopAppBar(title = { Text("CCTV View And Track") }) }
     ) { paddingValues ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(paddingValues).padding(20.dp),

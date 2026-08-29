@@ -76,9 +76,9 @@ class CctvNetworkScanner {
     }
 
     companion object {
-        val CCTV_PORTS = listOf(80, 554, 8000, 8080, 8554, 8899, 5000, 37777)
-        val CCTV_SIGNATURE_PORTS = setOf(554, 8000, 8554, 8899, 5000, 37777)
-        private const val CONNECT_TIMEOUT_MS = 250
+        val CCTV_PORTS = listOf(554, 8554, 8080, 80)
+        val CCTV_SIGNATURE_PORTS = setOf(554, 8554)
+        private const val CONNECT_TIMEOUT_MS = 2000
         private const val MAX_CONCURRENT_HOSTS = 32
         const val MAX_HOSTS = 1_024
         private const val MIN_SUPPORTED_PREFIX = 8

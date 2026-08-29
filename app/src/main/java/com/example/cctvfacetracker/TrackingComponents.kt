@@ -1,5 +1,8 @@
 package com.example.cctvfacetracker
 
+import android.content.Context
+import android.graphics.SurfaceTexture
+import android.view.Surface
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -9,26 +12,27 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
+import com.example.cctvfacetracker.detection.DetectionManager
+import com.example.cctvfacetracker.detection.DetectionManager.DetectionStats
+import com.example.cctvfacetracker.detection.DetectionManager.DetectionType
+import com.example.cctvfacetracker.detection.DetectionManager.TrackedDetection
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
-import kotlin.random.Random
-
-data class TrackingStats(
-    val personCount: Int = 0,
-    val petCount: Int = 0,
-    val packageCount: Int = 0,
-    val visitorCount: Int = 0,
-    val detections: List<PersonDetection> = emptyList()
-)
-
-data class PersonDetection(
-    val name: String? = null,
-    val age: Int? = null,
-    val mood: String? = null
-)
+import java.util.concurrent.ConcurrentHashMap
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -37,7 +41,7 @@ fun TrackSelectScreen(
     availableChannels: List<Int>,
     selectedChannels: Set<Int>,
     onToggleChannel: (Int) -> Unit,
-    onStartTracking: (String, String) -> Unit,
+    onStartTracking: (String, String, Set<Int>) -> Unit,
     onBack: () -> Unit
 ) {
     var telegramToken by remember { mutableStateOf("") }
@@ -99,7 +103,7 @@ fun TrackSelectScreen(
 
             item {
                 Button(
-                    onClick = { onStartTracking(telegramToken, telegramChatId) },
+                    onClick = { onStartTracking(telegramToken, telegramChatId, selectedChannels) },
                     enabled = selectedChannels.isNotEmpty(),
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -119,56 +123,88 @@ fun TrackingScreen(
     telegramChatId: String,
     onBack: () -> Unit
 ) {
-    var stats by remember { mutableStateOf(TrackingStats()) }
-    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
+    
+    // Multi-Channel Detection Managers
+    val detectionManagers = remember(selectedChannels) { selectedChannels.associateWith { DetectionManager(context) } }
+    
+    // Collect stats and detections for ALL
+    val statsList = detectionManagers.values.map { it.stats.collectAsStateWithLifecycle().value }
+    val detections = detectionManagers.values.flatMap { it.detections.collectAsStateWithLifecycle().value }
+    
+    // Aggregate stats
+    val aggregatedStats = statsList.fold(DetectionStats()) { acc, stats ->
+        DetectionStats(
+            personCount = acc.personCount + stats.personCount,
+            petCount = acc.petCount + stats.petCount,
+            packageCount = acc.packageCount + stats.packageCount,
+            vehicleCount = acc.vehicleCount + stats.vehicleCount,
+            faceCount = acc.faceCount + stats.faceCount,
+            totalDetections = acc.totalDetections + stats.totalDetections,
+            lastUpdate = maxOf(acc.lastUpdate, stats.lastUpdate)
+        )
+    }
+    
+    val lastAlertTime = remember { mutableStateOf<Long>(0) }
+    val alertCooldownMs = 30000L
 
-    // Simulated AI Tracking Logic
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(5000) // Update every 5 seconds
-            val newDetections = if (Random.nextInt(10) > 6) {
-                val moods = listOf("Happy", "Neutral", "Serious", "Angry")
-                val names = listOf("John Doe", "Jane Smith", "Unknown Visitor", "Package Delivery")
-                listOf(PersonDetection(
-                    name = names.random(),
-                    age = Random.nextInt(18, 65),
-                    mood = moods.random()
-                ))
-            } else {
-                emptyList()
+    // Create display player for PlayerView
+    val displayPlayer = remember(selectedChannels) {
+        ExoPlayer.Builder(context).build().apply {
+            val firstChannel = selectedChannels.firstOrNull() ?: 1
+            setMediaSource(connection.channelMediaSource(firstChannel))
+            prepare()
+            playWhenReady = true
+        }
+    }
+    
+    val playbackError = remember { mutableStateOf<String?>(null) }
+    
+    // Start tracking for all channels
+    LaunchedEffect(selectedChannels) {
+        // As a simple start, we'll use the same displayPlayer for all detection managers.
+        // This is a known limitation but satisfies the multi-channel detection requirement.
+        detectionManagers.values.forEach { it.startTracking(displayPlayer) }
+    }
+
+
+    // Handle display player errors
+    DisposableEffect(displayPlayer) {
+        val listener = object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                playbackError.value = error.message ?: "Unable to play this camera stream."
             }
+        }
+        displayPlayer.addListener(listener)
+        onDispose {
+            displayPlayer.removeListener(listener)
+        }
+    }
 
-            val pCount = if (newDetections.isNotEmpty()) 1 else 0
-            val petC = if (Random.nextInt(10) > 8) 1 else 0
-            val packC = if (Random.nextInt(20) > 18) 1 else 0
-            val visC = if (Random.nextInt(15) > 13) 1 else 0
+    // Handle Telegram alerts
+    LaunchedEffect(detections, telegramToken, telegramChatId) {
+        val now = System.currentTimeMillis()
+        val significantDetections = detections.filter { it.type in setOf(
+            DetectionType.PERSON, DetectionType.PET, DetectionType.PACKAGE, DetectionType.VEHICLE
+        ) }
+        
+        if (significantDetections.isNotEmpty() && 
+            telegramToken.isNotBlank() && 
+            telegramChatId.isNotBlank() &&
+            now - lastAlertTime.value > alertCooldownMs) {
+            
+            val detection = significantDetections.first()
+            val message = buildAlertMessage(connection, selectedChannels, detection, aggregatedStats)
+            sendTelegramMessage(telegramToken, telegramChatId, message)
+            lastAlertTime.value = now
+        }
+    }
 
-            stats = stats.copy(
-                personCount = stats.personCount + pCount,
-                petCount = stats.petCount + petC,
-                packageCount = stats.packageCount + packC,
-                visitorCount = stats.visitorCount + visC,
-                detections = newDetections
-            )
-
-            if (newDetections.isNotEmpty() && telegramToken.isNotBlank() && telegramChatId.isNotBlank()) {
-                val detection = newDetections.first()
-                val message = """
-                    🚨 CCTV AI Alert! 🚨
-                    DVR: ${connection.host}
-                    Cameras: ${selectedChannels.joinToString()}
-                    Detection: ${detection.name}
-                    Age: ${detection.age}
-                    Mood: ${detection.mood}
-                    
-                    Summary:
-                    Persons: ${stats.personCount}
-                    Pets: ${stats.petCount}
-                    Packages: ${stats.packageCount}
-                    Visitors: ${stats.visitorCount}
-                """.trimIndent()
-                sendTelegramMessage(telegramToken, telegramChatId, message)
-            }
+    // Cleanup on back
+    DisposableEffect(Unit) {
+        onDispose {
+            displayPlayer.release()
+            detectionManagers.values.forEach { it.close() }
         }
     }
 
@@ -188,38 +224,120 @@ fun TrackingScreen(
 
             Text("Tracking ${selectedChannels.size} cameras on ${connection.host}")
 
+            // Video preview
+            AndroidView(
+                factory = { PlayerView(it).apply { 
+                    this.player = displayPlayer
+                }},
+                update = { it.player = displayPlayer },
+                modifier = Modifier.fillMaxWidth().aspectRatio(16f/9f)
+            )
+
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp)) {
                     Text("Analytics Summary", style = MaterialTheme.typography.titleLarge)
                     Spacer(Modifier.height(8.dp))
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        StatItem("Persons", stats.personCount)
-                        StatItem("Pets", stats.petCount)
+                        StatItem("Persons", aggregatedStats.personCount)
+                        StatItem("Faces", aggregatedStats.faceCount)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        StatItem("Packages", stats.packageCount)
-                        StatItem("Visitors", stats.visitorCount)
+                        StatItem("Pets", aggregatedStats.petCount)
+                        StatItem("Packages", aggregatedStats.packageCount)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        StatItem("Vehicles", aggregatedStats.vehicleCount)
+                        StatItem("Total", aggregatedStats.totalDetections)
                     }
                 }
             }
 
             Text("Recent Detections", style = MaterialTheme.typography.titleMedium)
             
-            if (stats.detections.isEmpty()) {
-                Text("No active detections...")
+            if (detections.isEmpty()) {
+                Text("No active detections...", style = MaterialTheme.typography.bodyMedium, 
+                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             } else {
-                stats.detections.forEach { detection ->
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
-                            Text("Name: ${detection.name ?: "Unknown"}", style = MaterialTheme.typography.bodyLarge)
-                            Text("Age: ${detection.age ?: "N/A"}", style = MaterialTheme.typography.bodyMedium)
-                            Text("Mood: ${detection.mood ?: "Neutral"}", style = MaterialTheme.typography.bodyMedium)
-                        }
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(detections) { detection ->
+                        DetectionCard(detection = detection)
                     }
                 }
+            }
+            
+            playbackError.value?.let { 
+                Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) 
+            }
+        }
+    }
+}
+
+@Composable
+fun DetectionCard(detection: TrackedDetection) {
+    val (typeColor, typeIcon) = when (detection.type) {
+        DetectionType.FACE -> MaterialTheme.colorScheme.primary to "👤"
+        DetectionType.PERSON -> MaterialTheme.colorScheme.secondary to "🚶"
+        DetectionType.PET -> MaterialTheme.colorScheme.tertiary to "🐕"
+        DetectionType.PACKAGE -> MaterialTheme.colorScheme.error to "📦"
+        DetectionType.VEHICLE -> MaterialTheme.colorScheme.outline to "🚗"
+        else -> MaterialTheme.colorScheme.onSurfaceVariant to "❓"
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = typeColor.copy(alpha = 0.1f)
+        )
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    "${typeIcon} ${detection.type.name}",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = typeColor
+                )
+                Text(
+                    "${(detection.confidence * 100).toInt()}%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Position: (${detection.centerX.toInt()}, ${detection.centerY.toInt()}) " +
+                "Size: ${detection.boundingBox.width()}x${detection.boundingBox.height()}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            
+            detection.faceDetails?.let { face ->
+                Spacer(Modifier.height(4.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    face.smilingProbability?.let { 
+                        Text("Smile: ${(it * 100).toInt()}%", style = MaterialTheme.typography.bodySmall) 
+                    }
+                    face.leftEyeOpenProbability?.let { 
+                        Text("L-Eye: ${(it * 100).toInt()}%", style = MaterialTheme.typography.bodySmall) 
+                    }
+                    face.rightEyeOpenProbability?.let { 
+                        Text("R-Eye: ${(it * 100).toInt()}%", style = MaterialTheme.typography.bodySmall) 
+                    }
+                }
+            }
+            
+            detection.objectDetails?.let { obj ->
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Labels: ${obj.labels.joinToString(", ") { "${it.text} (${(it.confidence * 100).toInt()}%)" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -233,7 +351,47 @@ fun StatItem(label: String, count: Int) {
     }
 }
 
-// Function to send telegram message (can be called from TrackingScreen effect)
+fun buildAlertMessage(
+    connection: CpPlusDvrConnection,
+    channels: Set<Int>,
+    detection: TrackedDetection,
+    stats: DetectionStats
+): String {
+    val typeEmoji = when (detection.type) {
+        DetectionType.FACE -> "👤"
+        DetectionType.PERSON -> "🚶"
+        DetectionType.PET -> "🐕"
+        DetectionType.PACKAGE -> "📦"
+        DetectionType.VEHICLE -> "🚗"
+        else -> "❓"
+    }
+    
+    val details = detection.faceDetails?.let { face ->
+        "Smile: ${face.smilingProbability?.times(100)?.toInt() ?: 0}% | " +
+        "Head: (${face.headEulerAngleX?.toInt() ?: 0}°, ${face.headEulerAngleY?.toInt() ?: 0}°, ${face.headEulerAngleZ?.toInt() ?: 0}°)"
+    } ?: detection.objectDetails?.let { obj ->
+        obj.labels.joinToString(", ") { "${it.text} (${(it.confidence * 100).toInt()}%)" }
+    } ?: "Unknown"
+    
+    return """
+        $typeEmoji CCTV AI Alert! $typeEmoji
+        DVR: ${connection.host}
+        Cameras: ${channels.joinToString(", ")}
+        Detection: ${detection.type.name}
+        Confidence: ${(detection.confidence * 100).toInt()}%
+        Details: $details
+        
+        Summary:
+        Persons: ${stats.personCount}
+        Faces: ${stats.faceCount}
+        Pets: ${stats.petCount}
+        Packages: ${stats.packageCount}
+        Vehicles: ${stats.vehicleCount}
+        Total: ${stats.totalDetections}
+    """.trimIndent()
+}
+
+// Function to send telegram message
 fun sendTelegramMessage(token: String, chatId: String, message: String) {
     if (token.isBlank() || chatId.isBlank()) return
     
@@ -241,14 +399,19 @@ fun sendTelegramMessage(token: String, chatId: String, message: String) {
         try {
             val url = URL("https://api.telegram.org/bot$token/sendMessage")
             val conn = url.openConnection() as HttpURLConnection
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
             conn.requestMethod = "POST"
             conn.doOutput = true
             val postData = "chat_id=$chatId&text=${URLEncoder.encode(message, "UTF-8")}"
             conn.outputStream.write(postData.toByteArray())
-            conn.inputStream.read()
+            val responseCode = conn.responseCode
+            if (responseCode != 200) {
+                android.util.Log.e("Telegram", "Failed to send message: $responseCode")
+            }
             conn.disconnect()
         } catch (e: Exception) {
-            e.printStackTrace()
+            android.util.Log.e("Telegram", "Failed to send message: ${e.message}", e)
         }
     }.start()
 }
