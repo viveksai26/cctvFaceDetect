@@ -186,7 +186,7 @@ private fun CctvTrackerScreen(
         AppScreen.VALIDATING -> connection?.let { CredentialValidationScreen(it, onCredentialsValidated, onCredentialFailure) }
         AppScreen.CAMERAS -> connection?.let { CameraListScreen(it, availableChannels, onChannelSelected, onBack) }
         AppScreen.VIEWER -> connection?.let { dvr -> selectedChannel?.let { CctvViewerScreen(dvr, it, onBack) } }
-        AppScreen.TRACK_SELECT -> TrackingSetupScreen(state.savedConnections, onBack, onConfirm = { onStartTracking("", "", selectedTrackChannels) })
+        AppScreen.TRACK_SELECT -> connection?.let { TrackingSetupScreen(it, availableChannels, selectedTrackChannels, onToggleTrackChannel, onStartTracking, onBack) }
         AppScreen.TRACKING -> TrackingDashboardScreen(
             repository = com.example.cctvfacetracker.database.JsonEmbeddingRepository(androidx.compose.ui.platform.LocalContext.current),
             analytics = com.example.cctvfacetracker.database.AnalyticsRepository(androidx.compose.ui.platform.LocalContext.current),
