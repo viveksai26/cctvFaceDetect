@@ -5,11 +5,7 @@ plugins {
 
 android {
     namespace = "com.example.cctvfacetracker"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.cctvfacetracker"
@@ -19,6 +15,8 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "TELEGRAM_BOT_TOKEN", "\"${project.findProperty("telegram.botToken") ?: ""}\"")
+        buildConfigField("String", "TELEGRAM_CHAT_ID", "\"${project.findProperty("telegram.chatId") ?: ""}\"")
     }
 
     buildTypes {
@@ -36,6 +34,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
@@ -59,8 +58,16 @@ dependencies {
     implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
     implementation(libs.kotlinx.coroutines.play.services)
-    implementation("com.google.mlkit:face-detection:16.1.6")
-    implementation("com.google.mlkit:object-detection:17.0.1")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
+    
+    // Room
+    val room_version = "2.6.1"
+    implementation("androidx.room:room-runtime:$room_version")
+    implementation("androidx.room:room-ktx:$room_version")
+    
+    // OkHttp
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
     debugImplementation(libs.androidx.compose.ui.tooling)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
