@@ -37,15 +37,17 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
         val inputSize = 640
         val resized = Bitmap.createScaledBitmap(frame, inputSize, inputSize, false)
         val floatBuffer = preprocess(resized)
-        
+
         val inputName = session.inputNames.iterator().next()
         val shape = longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong())
         
         val inputTensor = OnnxTensor.createTensor(env, floatBuffer, shape)
-        
+
         inputTensor.use {
             session.run(Collections.singletonMap(inputName, it)).use { results ->
-                return decode(results, frame.width.toFloat() / inputSize, frame.height.toFloat() / inputSize)
+                val decoded = decode(results, frame.width.toFloat() / inputSize, frame.height.toFloat() / inputSize)
+                android.util.Log.d("TRACKING_YUNET", "TRACKING_YUNET RESULT detections=${decoded.size}")
+                return decoded
             }
         }
     }
@@ -56,15 +58,17 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
         val pixels = IntArray(size * size)
         bitmap.getPixels(pixels, 0, size, 0, 0, size, size)
         
+        // YuNet (OpenCV Zoo) is trained on BGR, unnormalized [0,255] input
+        // (cv2.dnn.blobFromImage with scalefactor=1, swapRB=false) — matching that here.
         for (c in 0 until 3) {
             for (i in 0 until size * size) {
                 val pixel = pixels[i]
                 val channelValue = when (c) {
-                    0 -> (pixel shr 16) and 0xFF // R
+                    0 -> pixel and 0xFF          // B
                     1 -> (pixel shr 8) and 0xFF  // G
-                    else -> pixel and 0xFF       // B
+                    else -> (pixel shr 16) and 0xFF // R
                 }
-                buffer.put(channelValue.toFloat() / 255.0f)
+                buffer.put(channelValue.toFloat())
             }
         }
         buffer.rewind()
@@ -74,23 +78,36 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
     private fun decode(results: OrtSession.Result, scaleX: Float, scaleY: Float): List<FaceResult> {
         val faces = mutableListOf<FaceResult>()
         val strides = intArrayOf(8, 16, 32)
-        val scoreThreshold = 0.5f
+        val scoreThreshold = 0.6f
 
         for (stride in strides) {
-            val cls = getArray(results.get("cls_$stride").get() as OnnxTensor)
-            val obj = getArray(results.get("obj_$stride").get() as OnnxTensor)
-            val bbox = getArray(results.get("bbox_$stride").get() as OnnxTensor)
-            val kps = getArray(results.get("kps_$stride").get() as OnnxTensor)
+            val clsTensor = results.get("cls_$stride")
+            val objTensor = results.get("obj_$stride")
+            val bboxTensor = results.get("bbox_$stride")
+            val kpsTensor = results.get("kps_$stride")
+            
+            if (!clsTensor.isPresent || !objTensor.isPresent || !bboxTensor.isPresent || !kpsTensor.isPresent) continue
+
+            val cls = getArray(clsTensor.get() as OnnxTensor)
+            val obj = getArray(objTensor.get() as OnnxTensor)
+            val bbox = getArray(bboxTensor.get() as OnnxTensor)
+            val kps = getArray(kpsTensor.get() as OnnxTensor)
+
+            android.util.Log.d("TRACKING_YUNET_OUTPUT", "stride=$stride cls_size=${cls.size} obj_size=${obj.size} bbox_size=${bbox.size}")
 
             val gridSize = 640 / stride
             for (y in 0 until gridSize) {
                 for (x in 0 until gridSize) {
                     val idx = (y * gridSize + x)
-                    val score = sigmoid(cls[idx]) * sigmoid(obj[idx])
+                    // Matches OpenCV's FaceDetectorYN::postProcess: raw cls/obj are already
+                    // bounded (no extra sigmoid), combined via geometric mean.
+                    val clsScore = cls[idx].coerceIn(0f, 1f)
+                    val objScore = obj[idx].coerceIn(0f, 1f)
+                    val score = Math.sqrt((clsScore * objScore).toDouble()).toFloat()
                     if (score < scoreThreshold) continue
 
-                    val cx = (x + 0.5f) * stride + bbox[idx * 4 + 0] * stride
-                    val cy = (y + 0.5f) * stride + bbox[idx * 4 + 1] * stride
+                    val cx = (x + bbox[idx * 4 + 0]) * stride
+                    val cy = (y + bbox[idx * 4 + 1]) * stride
                     val w = Math.exp(bbox[idx * 4 + 2].toDouble()).toFloat() * stride
                     val h = Math.exp(bbox[idx * 4 + 3].toDouble()).toFloat() * stride
 
@@ -103,8 +120,8 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
 
                     val points = Array(5) { i ->
                         PointF(
-                            ((x + 0.5f) * stride + kps[idx * 10 + i * 2 + 0] * stride) * scaleX,
-                            ((y + 0.5f) * stride + kps[idx * 10 + i * 2 + 1] * stride) * scaleY
+                            (x + kps[idx * 10 + i * 2 + 0]) * stride * scaleX,
+                            (y + kps[idx * 10 + i * 2 + 1]) * stride * scaleY
                         )
                     }
 
@@ -121,8 +138,6 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
         buffer.get(array)
         return array
     }
-
-    private fun sigmoid(x: Float): Float = 1.0f / (1.0f + Math.exp(-x.toDouble()).toFloat())
 
     private fun nms(faces: List<FaceResult>, iouThreshold: Float): List<FaceResult> {
         if (faces.isEmpty()) return emptyList()

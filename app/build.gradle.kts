@@ -17,6 +17,12 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "TELEGRAM_BOT_TOKEN", "\"${project.findProperty("telegram.botToken") ?: ""}\"")
         buildConfigField("String", "TELEGRAM_CHAT_ID", "\"${project.findProperty("telegram.chatId") ?: ""}\"")
+
+        ndk {
+            // onnxruntime-android ships native libs for 4 ABIs (~125MB); restrict to the
+            // ABIs we actually target to keep the APK installable on space-constrained devices/emulators.
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {

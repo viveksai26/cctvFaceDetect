@@ -15,8 +15,13 @@ class FaceRecognizerImpl(context: Context) : FaceRecognizer, AutoCloseable {
     private val session: OrtSession
 
     init {
-        val modelFile = copyModelToCache(context, "models/face_recognition_sface_2021dec.onnx")
-        session = env.createSession(modelFile.absolutePath)
+        session = try {
+            val modelFile = copyModelToCache(context, "models/face_recognition_sface_2021dec.onnx")
+            env.createSession(modelFile.absolutePath)
+        } catch (e: Exception) {
+            android.util.Log.e("FaceRecognizerImpl", "SFace model load failed: ${e.message}", e)
+            throw e
+        }
     }
 
     private fun copyModelToCache(context: Context, assetPath: String): File {
@@ -55,6 +60,8 @@ class FaceRecognizerImpl(context: Context) : FaceRecognizer, AutoCloseable {
         val pixels = IntArray(size * size)
         bitmap.getPixels(pixels, 0, size, 0, 0, size, size)
         
+        // SFace is trained on RGB, unnormalized [0,255] input
+        // (cv2.dnn.blobFromImage with scalefactor=1, swapRB=true) — matching that here.
         for (c in 0 until 3) {
             for (i in 0 until size * size) {
                 val pixel = pixels[i]
@@ -63,7 +70,7 @@ class FaceRecognizerImpl(context: Context) : FaceRecognizer, AutoCloseable {
                     1 -> (pixel shr 8) and 0xFF  // G
                     else -> pixel and 0xFF       // B
                 }
-                buffer.put(channelValue.toFloat() / 255.0f)
+                buffer.put(channelValue.toFloat())
             }
         }
         buffer.rewind()

@@ -12,7 +12,7 @@ import java.io.IOException
 class TelegramSender(private val botToken: String, private val chatId: String) {
     private val client = OkHttpClient()
 
-    suspend fun sendAlert(bitmap: Bitmap, caption: String) = withContext(Dispatchers.IO) {
+    suspend fun sendAlert(bitmap: Bitmap, caption: String): Boolean = withContext(Dispatchers.IO) {
         val stream = ByteArrayOutputStream()
         bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
         val byteArray = stream.toByteArray()
@@ -33,8 +33,10 @@ class TelegramSender(private val botToken: String, private val chatId: String) {
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) throw IOException("Unexpected code $response")
             }
+            true
         } catch (e: Exception) {
             e.printStackTrace()
+            false
         }
     }
 }

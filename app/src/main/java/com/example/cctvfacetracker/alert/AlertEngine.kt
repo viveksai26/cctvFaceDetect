@@ -34,18 +34,18 @@ class AlertEngine(
                 logRepo.addLog("Unknown face")
             } else {
                 analyticsRepo.increment("known_detections")
-                logRepo.addLog("\$name recognized")
+                logRepo.addLog("$name recognized")
             }
         }
-        
+
         val currentTime = System.currentTimeMillis()
         if (currentTime - (lastAlertTime[name] ?: 0L) < ALERT_COOLDOWN) return
         lastAlertTime[name] = currentTime
 
         scope.launch {
             val caption = "Face: $name\nDate/time: ${Date()}"
-            telegramSender.sendAlert(image, caption)
-            logRepo.addLog("Telegram alert sent for $name")
+            val sent = telegramSender.sendAlert(image, caption)
+            logRepo.addLog(if (sent) "Telegram alert sent for $name" else "Telegram alert failed for $name")
         }
     }
 }

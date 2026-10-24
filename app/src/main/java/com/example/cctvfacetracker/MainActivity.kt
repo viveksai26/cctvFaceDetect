@@ -187,12 +187,18 @@ private fun CctvTrackerScreen(
         AppScreen.CAMERAS -> connection?.let { CameraListScreen(it, availableChannels, onChannelSelected, onBack) }
         AppScreen.VIEWER -> connection?.let { dvr -> selectedChannel?.let { CctvViewerScreen(dvr, it, onBack) } }
         AppScreen.TRACK_SELECT -> connection?.let { TrackingSetupScreen(it, availableChannels, selectedTrackChannels, onToggleTrackChannel, onStartTracking, onBack) }
-        AppScreen.TRACKING -> TrackingDashboardScreen(
-            repository = com.example.cctvfacetracker.database.JsonEmbeddingRepository(androidx.compose.ui.platform.LocalContext.current),
-            analytics = com.example.cctvfacetracker.database.AnalyticsRepository(androidx.compose.ui.platform.LocalContext.current),
-            logs = com.example.cctvfacetracker.database.LogRepository(androidx.compose.ui.platform.LocalContext.current),
-            onBack = onBack
-        )
+        AppScreen.TRACKING -> connection?.let { dvr ->
+            TrackingDashboardScreen(
+                connection = dvr,
+                selectedTrackChannels = selectedTrackChannels,
+                telegramToken = telegramToken,
+                telegramChatId = telegramChatId,
+                repository = com.example.cctvfacetracker.database.JsonEmbeddingRepository(androidx.compose.ui.platform.LocalContext.current),
+                analytics = com.example.cctvfacetracker.database.AnalyticsRepository(androidx.compose.ui.platform.LocalContext.current),
+                logs = com.example.cctvfacetracker.database.LogRepository(androidx.compose.ui.platform.LocalContext.current),
+                onBack = onBack
+            )
+        }
     }
 }
 @OptIn(ExperimentalMaterial3Api::class)

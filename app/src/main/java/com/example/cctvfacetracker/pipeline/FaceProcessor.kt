@@ -12,22 +12,35 @@ class FaceProcessor(
     private var listener: PipelineListener? = null
 
     override fun processFrame(frame: Bitmap) {
-        val detectedFaces = detector.detectFaces(frame)
-        val rects = detectedFaces.map { Rect(it.boundingBox.left.toInt(), it.boundingBox.top.toInt(), it.boundingBox.right.toInt(), it.boundingBox.bottom.toInt()) }
-        val trackedFaces = tracker.updateTrackers(rects)
-        
-        for (face in trackedFaces) {
-            listener?.onFaceDetected(PipelineFaceResult(face.id, face.boundingBox))
+        try {
+            android.util.Log.d("TRACKING_PIPELINE", "TRACKING_PIPELINE processFrame START bitmap=${frame.width}x${frame.height}")
+            val detectedFaces = detector.detectFaces(frame)
+            android.util.Log.d("TRACKING_PIPELINE", "TRACKING_PIPELINE processFrame RESULT detections=${detectedFaces.size}")
             
-            // Extract face image for recognition
-            val faceBitmap = Bitmap.createBitmap(frame, face.boundingBox.left.coerceIn(0, frame.width - 1), face.boundingBox.top.coerceIn(0, frame.height - 1), 
-                face.boundingBox.width().coerceIn(1, frame.width - face.boundingBox.left.toInt()), 
-                face.boundingBox.height().coerceIn(1, frame.height - face.boundingBox.top.toInt()))
+            val rects = detectedFaces.map { Rect(it.boundingBox.left.toInt(), it.boundingBox.top.toInt(), it.boundingBox.right.toInt(), it.boundingBox.bottom.toInt()) }
+            val trackedFaces = tracker.updateTrackers(rects)
             
-            val result = recognizer.recognize(faceBitmap, embeddingRepo.getEnrolledEmbeddings())
-            if (result != null) {
-                listener?.onRecognitionResult(result.first, result.second, faceBitmap)
+            for ((index, face) in trackedFaces.withIndex()) {
+                android.util.Log.d("TRACKING_PIPELINE", "TRACKING_FACE_DETECTED index=$index")
+                listener?.onFaceDetected(PipelineFaceResult(face.id, face.boundingBox))
+                
+                android.util.Log.d("TRACKING_SFACE", "TRACKING_SFACE START")
+                val faceBitmap = Bitmap.createBitmap(frame, face.boundingBox.left.coerceIn(0, frame.width - 1), face.boundingBox.top.coerceIn(0, frame.height - 1), 
+                    face.boundingBox.width().coerceIn(1, frame.width - face.boundingBox.left.toInt()), 
+                    face.boundingBox.height().coerceIn(1, frame.height - face.boundingBox.top.toInt()))
+                android.util.Log.d("TRACKING_SFACE", "TRACKING_SFACE RESULT")
+                
+                val enrolled = embeddingRepo.getEnrolledEmbeddings()
+                android.util.Log.d("TRACKING_RECOGNITION", "TRACKING_RECOGNITION START enrolled=${enrolled.size}")
+                val result = recognizer.recognize(faceBitmap, enrolled)
+                android.util.Log.d("TRACKING_RECOGNITION", "TRACKING_RECOGNITION RESULT name=${result?.first ?: "null"}")
+                
+                if (result != null) {
+                    listener?.onRecognitionResult(result.first, result.second, faceBitmap)
+                }
             }
+        } catch (e: Exception) {
+            android.util.Log.e("TRACKING_PIPELINE", "TRACKING_PIPELINE ERROR: ${e.message}", e)
         }
     }
 
