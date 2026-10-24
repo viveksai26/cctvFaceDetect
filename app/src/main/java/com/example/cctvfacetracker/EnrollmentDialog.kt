@@ -72,7 +72,7 @@ fun EnrollmentDialog(
                 if (name.isNotBlank()) {
                     scope.launch {
                         val embedding = recognizer.extractEmbedding(faceImage)
-                        repository.enroll(name, embedding)
+                        repository.enroll(name, embedding, faceImage)
                         onDismiss()
                     }
                 }

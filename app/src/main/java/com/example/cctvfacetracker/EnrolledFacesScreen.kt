@@ -1,5 +1,6 @@
 package com.example.cctvfacetracker
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -7,11 +8,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
 import com.example.cctvfacetracker.database.JsonEmbeddingRepository
 import kotlinx.coroutines.launch
 
-/** Lists enrolled names with their sample counts, and lets you rename or delete them. */
+/** Lists enrolled names with their photo and sample count, and lets you rename or delete them. */
 @Composable
 fun EnrolledFacesScreen(
     repository: JsonEmbeddingRepository,
@@ -43,6 +45,17 @@ fun EnrolledFacesScreen(
             items(faces.entries.toList(), key = { it.key }) { (name, samples) ->
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        val thumbnail = repository.getThumbnail(name)
+                        if (thumbnail != null) {
+                            Image(
+                                bitmap = thumbnail.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier.size(56.dp),
+                            )
+                        } else {
+                            Box(modifier = Modifier.size(56.dp))
+                        }
+                        Spacer(Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(name, style = MaterialTheme.typography.titleMedium)
                             Text(
