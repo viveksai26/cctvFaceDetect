@@ -1,5 +1,6 @@
 package com.example.cctvfacetracker
 
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -17,7 +18,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -36,11 +36,11 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.rtsp.RtspMediaSource
 import androidx.media3.ui.PlayerView
+import com.example.cctvfacetracker.pipeline.FacePipeline
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetSocketAddress
 import java.net.Socket
-import kotlin.coroutines.resume
 
 data class CpPlusDvrConnection(val host: String, val rtspPort: Int, val username: String, val password: String, val numCameras: Int) {
     fun channelUri(channel: Int): String {
@@ -120,7 +120,7 @@ fun CameraListScreen(connection: CpPlusDvrConnection, availableChannels: List<In
 }
 
 @Composable
-fun CctvViewerScreen(connection: CpPlusDvrConnection, channel: Int, onBack: () -> Unit) {
+fun CctvViewerScreen(connection: CpPlusDvrConnection, channel: Int, onBack: () -> Unit, facePipeline: FacePipeline? = null) {
     val context = LocalContext.current
     var playbackError by remember { mutableStateOf<String?>(null) }
     val player = remember(connection, channel) {
@@ -132,6 +132,12 @@ fun CctvViewerScreen(connection: CpPlusDvrConnection, channel: Int, onBack: () -
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) { playbackError = error.message ?: "Unable to play this camera stream." }
+            
+            // Frame processing integration point
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                // In a real implementation, we would hook into the video frame rendering callback
+                // to extract frames and pass them to facePipeline.processFrame(bitmap).
+            }
         }
         player.addListener(listener)
         onDispose { player.removeListener(listener); player.release() }

@@ -10,7 +10,14 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-data class SavedDvrCredentials(val id: String, val host: String, val username: String, val password: String, val rtspPort: Int, val numCameras: Int)
+data class SavedDvrCredentials(
+    val id: String,
+    val host: String,
+    val username: String,
+    val password: String,
+    val rtspPort: Int,
+    val numCameras: Int
+)
 
 /** Stores DVR credentials encrypted with a device-bound Android Keystore key. */
 class DvrCredentialStore(context: Context) {
