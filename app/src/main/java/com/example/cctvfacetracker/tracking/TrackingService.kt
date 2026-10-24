@@ -32,6 +32,9 @@ import com.example.cctvfacetracker.pipeline.FaceDetectorImpl
 import com.example.cctvfacetracker.pipeline.FaceProcessor
 import com.example.cctvfacetracker.pipeline.FaceRecognizerImpl
 import com.example.cctvfacetracker.pipeline.FaceTrackerImpl
+import com.example.cctvfacetracker.pipeline.PipelineFaceResult
+import com.example.cctvfacetracker.pipeline.PipelineListener
+import com.example.cctvfacetracker.pipeline.SmoothingListener
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -49,18 +52,23 @@ class TrackingService : Service() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main.immediate + SupervisorJob())
     private var running = false
+    private lateinit var connection: CpPlusDvrConnection
 
     private lateinit var logRepository: LogRepository
     private lateinit var analyticsRepository: AnalyticsRepository
     private lateinit var embeddingRepository: JsonEmbeddingRepository
     private lateinit var alertEngine: AlertEngine
 
+    // Shared across all channels: ONNX Runtime sessions are documented thread-safe for
+    // concurrent Run() calls, so one detector/recognizer per service (not per channel) avoids
+    // duplicating ~40MB+ of loaded model weights for every extra camera tracked.
+    private lateinit var sharedDetector: FaceDetectorImpl
+    private lateinit var sharedRecognizer: FaceRecognizerImpl
+
     private class ChannelResources(
-        val player: ExoPlayer,
+        var player: ExoPlayer,
         var imageReader: ImageReader,
-        val captureThread: HandlerThread,
-        val detector: FaceDetectorImpl,
-        val recognizer: FaceRecognizerImpl,
+        var captureThread: HandlerThread,
     )
 
     private val channelResources = mutableMapOf<Int, ChannelResources>()
@@ -75,7 +83,7 @@ class TrackingService : Service() {
 
         startForeground(NOTIFICATION_ID_STATUS, buildStatusNotification(0, 0))
 
-        if (running) return START_STICKY
+        if (running) return START_REDELIVER_INTENT
 
         val host = intent?.getStringExtra(EXTRA_HOST)
         val channels = intent?.getIntArrayExtra(EXTRA_CHANNELS) ?: IntArray(0)
@@ -85,13 +93,15 @@ class TrackingService : Service() {
         }
         running = true
 
-        val connection = CpPlusDvrConnection(
+        connection = CpPlusDvrConnection(
             host,
             intent.getIntExtra(EXTRA_PORT, 554),
             intent.getStringExtra(EXTRA_USERNAME) ?: "",
             intent.getStringExtra(EXTRA_PASSWORD) ?: "",
             intent.getIntExtra(EXTRA_NUM_CAMERAS, 1),
         )
+        val telegramToken = intent.getStringExtra(EXTRA_TELEGRAM_TOKEN)
+        val telegramChatId = intent.getStringExtra(EXTRA_TELEGRAM_CHAT_ID)
 
         logRepository = LogRepository(this)
         analyticsRepository = AnalyticsRepository(this)
@@ -100,23 +110,28 @@ class TrackingService : Service() {
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob()),
             analyticsRepo = analyticsRepository,
             logRepo = logRepository,
+            telegramToken = telegramToken,
+            telegramChatId = telegramChatId,
         )
+        sharedDetector = FaceDetectorImpl(this)
+        sharedRecognizer = FaceRecognizerImpl(this)
 
         serviceScope.launch {
             logRepository.load()
             analyticsRepository.load()
             embeddingRepository.loadAll()
             logRepository.addLog("Tracking started")
+            TrackingPreferences(this@TrackingService).save(connection.host, channels.toSet())
             for (channel in channels) {
                 logRepository.addLog("Camera $channel tracking started")
-                startChannel(connection, channel)
+                startChannel(channel)
             }
             TrackingBus.isRunning.value = true
             refreshEmbeddingsPeriodically()
             refreshStatusNotificationPeriodically(channels.size)
         }
 
-        return START_STICKY
+        return START_REDELIVER_INTENT
     }
 
     private fun refreshEmbeddingsPeriodically() {
@@ -139,16 +154,27 @@ class TrackingService : Service() {
         }
     }
 
-    private fun startChannel(connection: CpPlusDvrConnection, channel: Int) {
+    private fun startChannel(channel: Int) {
         val captureThread = HandlerThread("capture-$channel").apply { start() }
         val captureHandler = Handler(captureThread.looper)
 
-        val detector = FaceDetectorImpl(this)
         val tracker = FaceTrackerImpl()
-        val recognizer = FaceRecognizerImpl(this)
-        val processor = FaceProcessor(detector, tracker, recognizer, embeddingRepository)
+        val processor = FaceProcessor(sharedDetector, tracker, sharedRecognizer, embeddingRepository)
         val notifier = FaceAlertNotifier(this, channel)
-        processor.setListener(CompositeListener(listOf(alertEngine, notifier)))
+
+        // Adapts sampling rate to activity: faster right after a detection (to keep up with a
+        // moving person), backing off towards MAX_INTERVAL_MS when nothing's been seen.
+        var currentIntervalMs = DEFAULT_INTERVAL_MS
+        var facesInLastFrame = 0
+        val intervalAdapter = object : PipelineListener {
+            override fun onFaceDetected(face: PipelineFaceResult) {
+                facesInLastFrame++
+            }
+            override fun onRecognitionResult(trackId: Int, name: String, confidence: Float, nearestCandidate: String?, image: Bitmap) {}
+        }
+        processor.setListener(
+            CompositeListener(listOf(intervalAdapter, SmoothingListener(CompositeListener(listOf(alertEngine, notifier)))))
+        )
 
         var lastProcessedAt = 0L
 
@@ -156,7 +182,7 @@ class TrackingService : Service() {
             reader.setOnImageAvailableListener({ r ->
                 val image = r.acquireLatestImage() ?: return@setOnImageAvailableListener
                 val now = SystemClock.elapsedRealtime()
-                if (now - lastProcessedAt < FRAME_INTERVAL_MS) {
+                if (now - lastProcessedAt < currentIntervalMs) {
                     image.close()
                     return@setOnImageAvailableListener
                 }
@@ -170,9 +196,15 @@ class TrackingService : Service() {
                 }
                 if (bitmap == null) return@setOnImageAvailableListener
                 TrackingBus.updateThumbnail(channel, bitmap)
+                facesInLastFrame = 0
                 // Runs synchronously on this channel's dedicated capture thread -- fine, it's
                 // already off the main thread and naturally serializes this channel's frames.
                 processor.processFrame(bitmap)
+                currentIntervalMs = if (facesInLastFrame > 0) {
+                    MIN_INTERVAL_MS
+                } else {
+                    (currentIntervalMs + INTERVAL_BACKOFF_STEP_MS).coerceAtMost(MAX_INTERVAL_MS)
+                }
                 serviceScope.launch {
                     logRepository.addLog("Camera $channel frame processed (${bitmap.width}x${bitmap.height})")
                 }
@@ -186,8 +218,6 @@ class TrackingService : Service() {
             player = ExoPlayer.Builder(this).build(),
             imageReader = imageReader,
             captureThread = captureThread,
-            detector = detector,
-            recognizer = recognizer,
         )
         channelResources[channel] = resources
 
@@ -197,6 +227,7 @@ class TrackingService : Service() {
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) {
                     serviceScope.launch { logRepository.addLog("Camera $channel tracking error: ${error.message}") }
+                    reconnectChannel(channel)
                 }
 
                 override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -214,6 +245,21 @@ class TrackingService : Service() {
             })
             prepare()
             playWhenReady = true
+        }
+    }
+
+    /** On an RTSP error, tear down this channel's player/surface and rebuild it after a delay. */
+    private fun reconnectChannel(channel: Int) {
+        serviceScope.launch {
+            delay(RECONNECT_DELAY_MS)
+            if (!running) return@launch
+            channelResources.remove(channel)?.let { old ->
+                old.player.release()
+                old.imageReader.close()
+                old.captureThread.quitSafely()
+            }
+            logRepository.addLog("Camera $channel reconnecting...")
+            startChannel(channel)
         }
     }
 
@@ -258,15 +304,23 @@ class TrackingService : Service() {
         val wasRunning = running
         running = false
         TrackingBus.isRunning.value = false
+        // Stop each capture thread from picking up new frames, and wait (briefly) for any
+        // frame it's already mid-processing to finish, *before* releasing the player/surface or
+        // closing the shared ONNX sessions underneath it -- otherwise a frame caught mid-flight
+        // can throw "Asking for inputs from a closed OrtSession" during the race.
         for ((_, resources) in channelResources) {
+            resources.captureThread.quitSafely()
+        }
+        for ((_, resources) in channelResources) {
+            runCatching { resources.captureThread.join(500) }
             resources.player.release()
             resources.imageReader.close()
-            resources.captureThread.quitSafely()
-            resources.detector.close()
-            resources.recognizer.close()
         }
         channelResources.clear()
+        if (::sharedDetector.isInitialized) sharedDetector.close()
+        if (::sharedRecognizer.isInitialized) sharedRecognizer.close()
         TrackingBus.reset()
+        TrackingPreferences(this).clear()
         if (wasRunning && ::logRepository.isInitialized) {
             serviceScope.launch { logRepository.addLog("Tracking stopped") }
         }
@@ -323,6 +377,8 @@ class TrackingService : Service() {
         private const val EXTRA_PASSWORD = "extra_password"
         private const val EXTRA_NUM_CAMERAS = "extra_num_cameras"
         private const val EXTRA_CHANNELS = "extra_channels"
+        private const val EXTRA_TELEGRAM_TOKEN = "extra_telegram_token"
+        private const val EXTRA_TELEGRAM_CHAT_ID = "extra_telegram_chat_id"
 
         const val CHANNEL_STATUS = "tracking_status"
         const val CHANNEL_ALERTS = "face_alerts"
@@ -330,9 +386,19 @@ class TrackingService : Service() {
 
         private const val DEFAULT_WIDTH = 640
         private const val DEFAULT_HEIGHT = 480
-        private const val FRAME_INTERVAL_MS = 2000L
+        private const val MIN_INTERVAL_MS = 1000L
+        private const val DEFAULT_INTERVAL_MS = 2000L
+        private const val MAX_INTERVAL_MS = 4000L
+        private const val INTERVAL_BACKOFF_STEP_MS = 500L
+        private const val RECONNECT_DELAY_MS = 5000L
 
-        fun startIntent(context: Context, connection: CpPlusDvrConnection, channels: Set<Int>): Intent =
+        fun startIntent(
+            context: Context,
+            connection: CpPlusDvrConnection,
+            channels: Set<Int>,
+            telegramToken: String? = null,
+            telegramChatId: String? = null,
+        ): Intent =
             Intent(context, TrackingService::class.java).apply {
                 putExtra(EXTRA_HOST, connection.host)
                 putExtra(EXTRA_PORT, connection.rtspPort)
@@ -340,6 +406,8 @@ class TrackingService : Service() {
                 putExtra(EXTRA_PASSWORD, connection.password)
                 putExtra(EXTRA_NUM_CAMERAS, connection.numCameras)
                 putExtra(EXTRA_CHANNELS, channels.toIntArray())
+                if (!telegramToken.isNullOrBlank()) putExtra(EXTRA_TELEGRAM_TOKEN, telegramToken)
+                if (!telegramChatId.isNullOrBlank()) putExtra(EXTRA_TELEGRAM_CHAT_ID, telegramChatId)
             }
     }
 }

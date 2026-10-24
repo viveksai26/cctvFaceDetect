@@ -23,9 +23,11 @@ class FaceAlertNotifier(
         // Notification is posted once recognition resolves a name; nothing to do here.
     }
 
-    override fun onRecognitionResult(name: String, confidence: Float, image: Bitmap) {
+    override fun onRecognitionResult(trackId: Int, name: String, confidence: Float, nearestCandidate: String?, image: Bitmap) {
         if (name == "Unknown") {
-            TrackingBus.lastUnknownFace.value = image
+            TrackingBus.reportUnknownFace(channel, trackId, image, nearestCandidate)
+        } else {
+            TrackingBus.dismissUnknownFace(channel, trackId)
         }
 
         val now = System.currentTimeMillis()

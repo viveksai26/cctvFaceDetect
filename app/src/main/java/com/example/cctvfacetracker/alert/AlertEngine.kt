@@ -14,9 +14,16 @@ import java.util.Date
 class AlertEngine(
     private val scope: CoroutineScope,
     private val analyticsRepo: AnalyticsRepository,
-    private val logRepo: LogRepository
+    private val logRepo: LogRepository,
+    telegramToken: String? = null,
+    telegramChatId: String? = null,
 ) : PipelineListener {
-    private val telegramSender = TelegramSender(BuildConfig.TELEGRAM_BOT_TOKEN, BuildConfig.TELEGRAM_CHAT_ID)
+    // Per-session credentials (entered on the Tracking Setup screen) win when present;
+    // otherwise fall back to whatever was baked into BuildConfig at build time.
+    private val telegramSender = TelegramSender(
+        telegramToken?.takeIf { it.isNotBlank() } ?: BuildConfig.TELEGRAM_BOT_TOKEN,
+        telegramChatId?.takeIf { it.isNotBlank() } ?: BuildConfig.TELEGRAM_CHAT_ID,
+    )
     private val lastAlertTime = ConcurrentHashMap<String, Long>()
     private val ALERT_COOLDOWN = 60_000L // 1 minute
 
@@ -27,11 +34,11 @@ class AlertEngine(
         }
     }
 
-    override fun onRecognitionResult(name: String, confidence: Float, image: Bitmap) {
+    override fun onRecognitionResult(trackId: Int, name: String, confidence: Float, nearestCandidate: String?, image: Bitmap) {
         scope.launch {
             if (name == "Unknown") {
                 analyticsRepo.increment("unknown_detections")
-                logRepo.addLog("Unknown face")
+                logRepo.addLog(if (nearestCandidate != null) "Unknown face (possibly $nearestCandidate)" else "Unknown face")
             } else {
                 analyticsRepo.increment("known_detections")
                 logRepo.addLog("$name recognized")

@@ -10,7 +10,11 @@ import java.io.FileOutputStream
 import java.nio.FloatBuffer
 import java.util.Collections
 
-class FaceRecognizerImpl(context: Context) : FaceRecognizer, AutoCloseable {
+class FaceRecognizerImpl(
+    context: Context,
+    private val matchThreshold: Float = DEFAULT_MATCH_THRESHOLD,
+    private val nearMissThreshold: Float = DEFAULT_NEAR_MISS_THRESHOLD,
+) : FaceRecognizer, AutoCloseable {
     private val env = OrtEnvironment.getEnvironment()
     private val session: OrtSession
 
@@ -77,35 +81,37 @@ class FaceRecognizerImpl(context: Context) : FaceRecognizer, AutoCloseable {
         return buffer
     }
 
-    override fun recognize(faceImage: Bitmap, enrolledEmbeddings: Map<String, FloatArray>): Pair<String, Float>? {
+    override fun recognize(faceImage: Bitmap, enrolledEmbeddings: Map<String, List<FloatArray>>): RecognitionOutcome {
         val embedding = extractEmbedding(faceImage)
         var bestName = "Unknown"
         var bestSimilarity = -1f
 
-        for ((name, enrolled) in enrolledEmbeddings) {
-            val similarity = cosineSimilarity(embedding, enrolled)
-            if (similarity > bestSimilarity) {
-                bestSimilarity = similarity
+        // Each name may have several enrolled samples (different sightings/poses); match
+        // against whichever sample is closest, since any one of them confirms the identity.
+        for ((name, samples) in enrolledEmbeddings) {
+            val bestForName = samples.maxOfOrNull { cosineSimilarity(embedding, it) } ?: continue
+            if (bestForName > bestSimilarity) {
+                bestSimilarity = bestForName
                 bestName = name
             }
         }
 
-        return if (bestSimilarity > 0.6f) Pair(bestName, bestSimilarity) else Pair("Unknown", bestSimilarity)
-    }
-
-    private fun cosineSimilarity(a: FloatArray, b: FloatArray): Float {
-        var dot = 0f
-        var normA = 0f
-        var normB = 0f
-        for (i in a.indices) {
-            dot += a[i] * b[i]
-            normA += a[i] * a[i]
-            normB += b[i] * b[i]
+        return when {
+            bestSimilarity > matchThreshold -> RecognitionOutcome(bestName, bestSimilarity)
+            bestSimilarity > nearMissThreshold -> RecognitionOutcome("Unknown", bestSimilarity, nearestCandidate = bestName)
+            else -> RecognitionOutcome("Unknown", bestSimilarity)
         }
-        return dot / (Math.sqrt(normA.toDouble()).toFloat() * Math.sqrt(normB.toDouble()).toFloat())
     }
 
     override fun close() {
         session.close()
+    }
+
+    companion object {
+        /** Cosine-similarity cutoff for a match; tune per deployment lighting/camera/distance. */
+        const val DEFAULT_MATCH_THRESHOLD = 0.6f
+
+        /** Below this, a sighting isn't similar enough to any enrolled name to suggest one. */
+        const val DEFAULT_NEAR_MISS_THRESHOLD = 0.4f
     }
 }

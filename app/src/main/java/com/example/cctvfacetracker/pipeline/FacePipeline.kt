@@ -9,7 +9,7 @@ interface FacePipeline {
 
 interface PipelineListener {
     fun onFaceDetected(face: PipelineFaceResult)
-    fun onRecognitionResult(name: String, confidence: Float, image: android.graphics.Bitmap)
+    fun onRecognitionResult(trackId: Int, name: String, confidence: Float, nearestCandidate: String?, image: android.graphics.Bitmap)
 }
 
 data class PipelineFaceResult(val id: Int, val boundingBox: android.graphics.Rect)

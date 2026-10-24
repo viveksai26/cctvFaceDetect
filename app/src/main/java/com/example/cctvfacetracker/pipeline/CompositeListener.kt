@@ -8,7 +8,7 @@ class CompositeListener(private val listeners: List<PipelineListener>) : Pipelin
         listeners.forEach { it.onFaceDetected(face) }
     }
 
-    override fun onRecognitionResult(name: String, confidence: Float, image: Bitmap) {
-        listeners.forEach { it.onRecognitionResult(name, confidence, image) }
+    override fun onRecognitionResult(trackId: Int, name: String, confidence: Float, nearestCandidate: String?, image: Bitmap) {
+        listeners.forEach { it.onRecognitionResult(trackId, name, confidence, nearestCandidate, image) }
     }
 }

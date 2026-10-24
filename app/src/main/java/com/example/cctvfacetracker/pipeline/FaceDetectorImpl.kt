@@ -46,7 +46,7 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
         inputTensor.use {
             session.run(Collections.singletonMap(inputName, it)).use { results ->
                 val decoded = decode(results, frame.width.toFloat() / inputSize, frame.height.toFloat() / inputSize)
-                android.util.Log.d("TRACKING_YUNET", "TRACKING_YUNET RESULT detections=${decoded.size}")
+                TrackingLog.d("TRACKING_YUNET", "TRACKING_YUNET RESULT detections=${decoded.size}")
                 return decoded
             }
         }
@@ -93,36 +93,27 @@ class FaceDetectorImpl(context: Context) : FaceDetector, AutoCloseable {
             val bbox = getArray(bboxTensor.get() as OnnxTensor)
             val kps = getArray(kpsTensor.get() as OnnxTensor)
 
-            android.util.Log.d("TRACKING_YUNET_OUTPUT", "stride=$stride cls_size=${cls.size} obj_size=${obj.size} bbox_size=${bbox.size}")
+            TrackingLog.d("TRACKING_YUNET_OUTPUT", "stride=$stride cls_size=${cls.size} obj_size=${obj.size} bbox_size=${bbox.size}")
 
             val gridSize = 640 / stride
             for (y in 0 until gridSize) {
                 for (x in 0 until gridSize) {
                     val idx = (y * gridSize + x)
-                    // Matches OpenCV's FaceDetectorYN::postProcess: raw cls/obj are already
-                    // bounded (no extra sigmoid), combined via geometric mean.
-                    val clsScore = cls[idx].coerceIn(0f, 1f)
-                    val objScore = obj[idx].coerceIn(0f, 1f)
-                    val score = Math.sqrt((clsScore * objScore).toDouble()).toFloat()
+                    val score = yunetScore(cls[idx], obj[idx])
                     if (score < scoreThreshold) continue
 
-                    val cx = (x + bbox[idx * 4 + 0]) * stride
-                    val cy = (y + bbox[idx * 4 + 1]) * stride
-                    val w = Math.exp(bbox[idx * 4 + 2].toDouble()).toFloat() * stride
-                    val h = Math.exp(bbox[idx * 4 + 3].toDouble()).toFloat() * stride
+                    val box = yunetDecodeBox(x, y, stride, bbox[idx * 4 + 0], bbox[idx * 4 + 1], bbox[idx * 4 + 2], bbox[idx * 4 + 3])
 
                     val rect = RectF(
-                        (cx - w / 2) * scaleX,
-                        (cy - h / 2) * scaleY,
-                        (cx + w / 2) * scaleX,
-                        (cy + h / 2) * scaleY
+                        (box.cx - box.w / 2) * scaleX,
+                        (box.cy - box.h / 2) * scaleY,
+                        (box.cx + box.w / 2) * scaleX,
+                        (box.cy + box.h / 2) * scaleY
                     )
 
                     val points = Array(5) { i ->
-                        PointF(
-                            (x + kps[idx * 10 + i * 2 + 0]) * stride * scaleX,
-                            (y + kps[idx * 10 + i * 2 + 1]) * stride * scaleY
-                        )
+                        val (px, py) = yunetDecodePoint(x, y, stride, kps[idx * 10 + i * 2 + 0], kps[idx * 10 + i * 2 + 1])
+                        PointF(px * scaleX, py * scaleY)
                     }
 
                     faces.add(FaceResult(rect, score, points[0], points[1], points[2], points[3], points[4]))

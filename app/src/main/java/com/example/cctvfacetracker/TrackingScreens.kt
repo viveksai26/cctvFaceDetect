@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,6 +26,7 @@ import com.example.cctvfacetracker.database.JsonEmbeddingRepository
 import com.example.cctvfacetracker.database.LogRepository
 import com.example.cctvfacetracker.tracking.TrackingBus
 import com.example.cctvfacetracker.tracking.TrackingService
+import com.example.cctvfacetracker.tracking.UnknownSighting
 
 @Composable
 fun TrackingSetupScreen(
@@ -87,8 +89,8 @@ fun TrackingDashboardScreen(
     val analyticsData = remember { mutableStateOf(analytics.getData()) }
     val logData = remember { mutableStateOf(logs.getLogs()) }
     val thumbnails by TrackingBus.channelThumbnails.collectAsState()
-    val unknownFace by TrackingBus.lastUnknownFace.collectAsState()
-    var showEnrollDialog by remember { mutableStateOf(false) }
+    val unknownSightings by TrackingBus.unknownSightings.collectAsState()
+    var enrollingSighting by remember { mutableStateOf<UnknownSighting?>(null) }
 
     val enrollmentRecognizer = remember { com.example.cctvfacetracker.pipeline.FaceRecognizerImpl(context) }
     DisposableEffect(Unit) {
@@ -114,7 +116,7 @@ fun TrackingDashboardScreen(
 
         ContextCompat.startForegroundService(
             context,
-            TrackingService.startIntent(context, connection, selectedTrackChannels)
+            TrackingService.startIntent(context, connection, selectedTrackChannels, telegramToken, telegramChatId)
         )
 
         // The service persists logs/analytics to the same JSON files this screen reads from;
@@ -148,30 +150,42 @@ fun TrackingDashboardScreen(
             style = MaterialTheme.typography.bodySmall
         )
 
-        val currentUnknownFace = unknownFace
-        if (currentUnknownFace != null) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Unidentified face spotted", style = MaterialTheme.typography.titleSmall)
-                    Image(
-                        bitmap = currentUnknownFace.asImageBitmap(),
-                        contentDescription = null,
-                        modifier = Modifier.size(100.dp)
-                    )
-                    Button(onClick = { showEnrollDialog = true }) { Text("Enroll this face") }
+        if (unknownSightings.isNotEmpty()) {
+            Text("Unidentified Faces (${unknownSightings.size})", style = MaterialTheme.typography.titleSmall)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(unknownSightings, key = { "${it.channel}:${it.trackId}" }) { sighting ->
+                    Card {
+                        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Camera ${sighting.channel}", style = MaterialTheme.typography.labelSmall)
+                            Image(
+                                bitmap = sighting.image.asImageBitmap(),
+                                contentDescription = null,
+                                modifier = Modifier.size(80.dp)
+                            )
+                            sighting.nearestCandidate?.let {
+                                Text("possibly $it", style = MaterialTheme.typography.labelSmall)
+                            }
+                            Row {
+                                TextButton(onClick = { enrollingSighting = sighting }) { Text("Enroll") }
+                                TextButton(onClick = { TrackingBus.dismissUnknownFace(sighting.channel, sighting.trackId) }) { Text("Dismiss") }
+                            }
+                        }
+                    }
                 }
             }
-            if (showEnrollDialog) {
-                EnrollmentDialog(
-                    faceImage = currentUnknownFace,
-                    recognizer = enrollmentRecognizer,
-                    repository = repository,
-                    onDismiss = {
-                        showEnrollDialog = false
-                        TrackingBus.clearUnknownFace()
-                    }
-                )
-            }
+        }
+
+        enrollingSighting?.let { sighting ->
+            EnrollmentDialog(
+                faceImage = sighting.image,
+                recognizer = enrollmentRecognizer,
+                repository = repository,
+                suggestedName = sighting.nearestCandidate,
+                onDismiss = {
+                    TrackingBus.dismissUnknownFace(sighting.channel, sighting.trackId)
+                    enrollingSighting = null
+                }
+            )
         }
 
         Text("Live Feeds", style = MaterialTheme.typography.titleMedium)

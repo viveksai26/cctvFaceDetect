@@ -11,4 +11,10 @@ interface FaceDao {
 
     @Insert
     suspend fun insert(face: FaceEntity)
+
+    @Query("DELETE FROM faces WHERE name = :name")
+    suspend fun deleteByName(name: String)
+
+    @Query("UPDATE faces SET name = :newName WHERE name = :oldName")
+    suspend fun renameByName(oldName: String, newName: String)
 }

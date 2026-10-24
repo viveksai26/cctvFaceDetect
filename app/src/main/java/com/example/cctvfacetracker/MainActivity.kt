@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.cctvfacetracker.network.DiscoveredDevice
 
-private enum class AppScreen { DISCOVERY, CREDENTIALS, VALIDATING, CAMERAS, VIEWER, TRACK_SELECT, TRACKING }
+private enum class AppScreen { DISCOVERY, CREDENTIALS, VALIDATING, CAMERAS, VIEWER, TRACK_SELECT, TRACKING, ENROLLED_FACES }
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
@@ -138,12 +138,14 @@ CctvTrackerScreen(
                         telegramChatId = chatId
                         screen = AppScreen.TRACKING
                     },
+                    onManageFaces = { screen = AppScreen.ENROLLED_FACES },
                     onBack = {
                         screen = when (screen) {
                             AppScreen.TRACKING -> AppScreen.TRACK_SELECT
                             AppScreen.TRACK_SELECT -> AppScreen.DISCOVERY
                             AppScreen.VIEWER -> AppScreen.CAMERAS
                             AppScreen.CAMERAS, AppScreen.VALIDATING, AppScreen.CREDENTIALS -> AppScreen.DISCOVERY
+                            AppScreen.ENROLLED_FACES -> AppScreen.DISCOVERY
                             AppScreen.DISCOVERY -> AppScreen.DISCOVERY
                         }
                     },
@@ -178,10 +180,15 @@ private fun CctvTrackerScreen(
     onChannelSelected: (Int) -> Unit,
     onToggleTrackChannel: (Int) -> Unit,
     onStartTracking: (String, String, Set<Int>) -> Unit,
+    onManageFaces: () -> Unit,
     onBack: () -> Unit,
 ) {
     when (screen) {
-        AppScreen.DISCOVERY -> DiscoveryScreen(state, onScan, onCancel, onDeviceSelected, onManualAdd, onDeleteSavedConnection, onViewSavedConnection, onTrackSavedConnection, onEditSavedConnection)
+        AppScreen.DISCOVERY -> DiscoveryScreen(state, onScan, onCancel, onDeviceSelected, onManualAdd, onDeleteSavedConnection, onViewSavedConnection, onTrackSavedConnection, onEditSavedConnection, onManageFaces)
+        AppScreen.ENROLLED_FACES -> EnrolledFacesScreen(
+            repository = com.example.cctvfacetracker.database.JsonEmbeddingRepository(androidx.compose.ui.platform.LocalContext.current),
+            onBack = onBack,
+        )
         AppScreen.CREDENTIALS -> CredentialsScreen(selectedDevice, editingConnection, onCredentialsSubmitted, onBack)
         AppScreen.VALIDATING -> connection?.let { CredentialValidationScreen(it, onCredentialsValidated, onCredentialFailure) }
         AppScreen.CAMERAS -> connection?.let { CameraListScreen(it, availableChannels, onChannelSelected, onBack) }
@@ -213,6 +220,7 @@ private fun DiscoveryScreen(
     onViewSavedConnection: (CpPlusDvrConnection) -> Unit,
     onTrackSavedConnection: (CpPlusDvrConnection) -> Unit,
     onEditSavedConnection: (CpPlusDvrConnection) -> Unit,
+    onManageFaces: () -> Unit,
 ) {
     Scaffold(
         topBar = { TopAppBar(title = { Text("CCTV View And Track") }) }
@@ -243,9 +251,13 @@ private fun DiscoveryScreen(
                     Button(onClick = onScan, enabled = !state.isScanning && state.network != null, modifier = Modifier.weight(1f)) { 
                         Text("Scan LAN Cameras")
                     }
-                    Button(onClick = onManualAdd, modifier = Modifier.weight(1f)) { 
+                    Button(onClick = onManualAdd, modifier = Modifier.weight(1f)) {
                         Text("Manual Add via IP")
                     }
+                }
+                Spacer(Modifier.height(8.dp))
+                Button(onClick = onManageFaces, modifier = Modifier.fillMaxWidth()) {
+                    Text("Manage Enrolled Faces")
                 }
                 if (state.isScanning) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
