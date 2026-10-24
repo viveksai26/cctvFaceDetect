@@ -33,7 +33,7 @@ class FaceProcessor(
                 val enrolled = embeddingRepo.getEnrolledEmbeddings()
                 android.util.Log.d("TRACKING_RECOGNITION", "TRACKING_RECOGNITION START enrolled=${enrolled.size}")
                 val result = recognizer.recognize(faceBitmap, enrolled)
-                android.util.Log.d("TRACKING_RECOGNITION", "TRACKING_RECOGNITION RESULT name=${result?.first ?: "null"}")
+                android.util.Log.d("TRACKING_RECOGNITION", "TRACKING_RECOGNITION RESULT name=${result?.first ?: "null"} similarity=${result?.second ?: "null"}")
                 
                 if (result != null) {
                     listener?.onRecognitionResult(result.first, result.second, faceBitmap)

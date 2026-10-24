@@ -1,6 +1,12 @@
 package com.example.cctvfacetracker
 
-import android.view.TextureView
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -8,20 +14,17 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.lazy.rememberLazyListState
 import kotlinx.coroutines.*
 import androidx.compose.ui.unit.dp
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.rtsp.RtspMediaSource
+import androidx.core.content.ContextCompat
 import com.example.cctvfacetracker.database.AnalyticsRepository
 import com.example.cctvfacetracker.database.JsonEmbeddingRepository
 import com.example.cctvfacetracker.database.LogRepository
-import com.example.cctvfacetracker.pipeline.FacePipeline
+import com.example.cctvfacetracker.tracking.TrackingBus
+import com.example.cctvfacetracker.tracking.TrackingService
 
 @Composable
 fun TrackingSetupScreen(
@@ -34,13 +37,13 @@ fun TrackingSetupScreen(
 ) {
     var botToken by remember { mutableStateOf("") }
     var chatId by remember { mutableStateOf("") }
-    
+
     Column(modifier = Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Button(onClick = onBack) { Text("Back") }
         Text("Tracking Setup", style = MaterialTheme.typography.headlineMedium)
         OutlinedTextField(value = botToken, onValueChange = { botToken = it }, label = { Text("Telegram Bot Token (Optional)") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = chatId, onValueChange = { chatId = it }, label = { Text("Telegram Chat ID (Optional)") }, modifier = Modifier.fillMaxWidth())
-        
+
         Text("Select Cameras to Track:", style = MaterialTheme.typography.titleMedium)
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(availableChannels) { channel ->
@@ -55,7 +58,7 @@ fun TrackingSetupScreen(
                 }
             }
         }
-        
+
         Button(
             onClick = { onStartTracking(botToken, chatId, selectedTrackChannels) },
             modifier = Modifier.fillMaxWidth()
@@ -63,14 +66,12 @@ fun TrackingSetupScreen(
     }
 }
 
-/** Holds the pipeline + its closeable ONNX sessions for the lifetime of the dashboard screen. */
-private class TrackingPipeline(
-    val detector: com.example.cctvfacetracker.pipeline.FaceDetectorImpl,
-    val recognizer: com.example.cctvfacetracker.pipeline.FaceRecognizerImpl,
-    val processor: com.example.cctvfacetracker.pipeline.FaceProcessor,
-    val alertScope: CoroutineScope,
-)
-
+/**
+ * The pipeline itself runs headlessly in [TrackingService] (so it survives this screen, and the
+ * app, being backgrounded). This screen just starts that service and reflects its state: logs
+ * and analytics are read from the JSON files the service writes to, and live thumbnails / the
+ * last unidentified face come from [TrackingBus], an in-process bridge to the running service.
+ */
 @Composable
 fun TrackingDashboardScreen(
     connection: CpPlusDvrConnection,
@@ -85,46 +86,45 @@ fun TrackingDashboardScreen(
     val context = LocalContext.current
     val analyticsData = remember { mutableStateOf(analytics.getData()) }
     val logData = remember { mutableStateOf(logs.getLogs()) }
+    val thumbnails by TrackingBus.channelThumbnails.collectAsState()
+    val unknownFace by TrackingBus.lastUnknownFace.collectAsState()
+    var showEnrollDialog by remember { mutableStateOf(false) }
 
-    // AnalyticsRepository/LogRepository.getData()/getLogs() each return a fresh snapshot copy,
-    // so reassigning state here reliably triggers recomposition.
-    fun refreshDashboardState() {
-        analyticsData.value = analytics.getData()
-        logData.value = logs.getLogs()
+    val enrollmentRecognizer = remember { com.example.cctvfacetracker.pipeline.FaceRecognizerImpl(context) }
+    DisposableEffect(Unit) {
+        onDispose { enrollmentRecognizer.close() }
     }
 
-    val pipeline = remember {
-        val detector = com.example.cctvfacetracker.pipeline.FaceDetectorImpl(context)
-        val tracker = com.example.cctvfacetracker.pipeline.FaceTrackerImpl()
-        val recognizer = com.example.cctvfacetracker.pipeline.FaceRecognizerImpl(context)
-        val processor = com.example.cctvfacetracker.pipeline.FaceProcessor(detector, tracker, recognizer, repository)
-        val alertScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        val alertEngine = com.example.cctvfacetracker.alert.AlertEngine(
-            scope = alertScope,
-            analyticsRepo = analytics,
-            logRepo = logs
-        )
-        processor.setListener(alertEngine)
-        TrackingPipeline(detector, recognizer, processor, alertScope)
-    }
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* tracking proceeds either way; denial just means no system notifications */ }
 
     LaunchedEffect(Unit) {
         logs.load()
         analytics.load()
-        repository.loadAll()
-        logs.addLog("Tracking started")
-        for (channel in selectedTrackChannels) {
-            logs.addLog("Camera $channel tracking started")
-        }
-        refreshDashboardState()
-    }
+        analyticsData.value = analytics.getData()
+        logData.value = logs.getLogs()
 
-    DisposableEffect(Unit) {
-        onDispose {
-            pipeline.detector.close()
-            pipeline.recognizer.close()
-            CoroutineScope(Dispatchers.IO).launch { logs.addLog("Tracking stopped") }
-            pipeline.alertScope.cancel()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        ContextCompat.startForegroundService(
+            context,
+            TrackingService.startIntent(context, connection, selectedTrackChannels)
+        )
+
+        // The service persists logs/analytics to the same JSON files this screen reads from;
+        // poll periodically so this UI reflects what's happening in the background pipeline.
+        while (isActive) {
+            delay(2000)
+            logs.load()
+            analytics.load()
+            logData.value = logs.getLogs()
+            analyticsData.value = analytics.getData()
         }
     }
 
@@ -134,12 +134,45 @@ fun TrackingDashboardScreen(
     ) {
         Spacer(modifier = Modifier.height(24.dp))
         Button(
-            onClick = onBack,
+            onClick = {
+                context.startService(Intent(context, TrackingService::class.java).setAction(TrackingService.ACTION_STOP))
+                onBack()
+            },
             modifier = Modifier.fillMaxWidth()
         ) { Text("Stop Tracking") }
 
         Text("Tracking Dashboard", style = MaterialTheme.typography.headlineMedium)
         Text("Total Detections: ${analyticsData.value.optInt("total_detections")}")
+        Text(
+            "Tracking keeps running in the background — a notification stays visible while it's active.",
+            style = MaterialTheme.typography.bodySmall
+        )
+
+        val currentUnknownFace = unknownFace
+        if (currentUnknownFace != null) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Unidentified face spotted", style = MaterialTheme.typography.titleSmall)
+                    Image(
+                        bitmap = currentUnknownFace.asImageBitmap(),
+                        contentDescription = null,
+                        modifier = Modifier.size(100.dp)
+                    )
+                    Button(onClick = { showEnrollDialog = true }) { Text("Enroll this face") }
+                }
+            }
+            if (showEnrollDialog) {
+                EnrollmentDialog(
+                    faceImage = currentUnknownFace,
+                    recognizer = enrollmentRecognizer,
+                    repository = repository,
+                    onDismiss = {
+                        showEnrollDialog = false
+                        TrackingBus.clearUnknownFace()
+                    }
+                )
+            }
+        }
 
         Text("Live Feeds", style = MaterialTheme.typography.titleMedium)
         Row(
@@ -147,14 +180,18 @@ fun TrackingDashboardScreen(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             for (channel in selectedTrackChannels) {
-                key(channel) {
-                    TrackedChannelFeed(
-                        connection = connection,
-                        channel = channel,
-                        processor = pipeline.processor,
-                        logs = logs,
-                        onFrameProcessed = { refreshDashboardState() },
-                    )
+                Column {
+                    Text("Camera $channel", style = MaterialTheme.typography.labelSmall)
+                    val bitmap = thumbnails[channel]
+                    if (bitmap != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = null,
+                            modifier = Modifier.size(width = 120.dp, height = 68.dp)
+                        )
+                    } else {
+                        Box(modifier = Modifier.size(width = 120.dp, height = 68.dp))
+                    }
                 }
             }
         }
@@ -178,81 +215,5 @@ fun TrackingDashboardScreen(
                 Text("[${log.getString("time")}] ${log.getString("message")}")
             }
         }
-    }
-}
-
-/**
- * Renders one tracked camera's stream into an off-screen-sized [TextureView] (ExoPlayer has no
- * direct bitmap-frame API) and periodically grabs a real frame from it to feed the pipeline,
- * replacing the previous dummy/blank-bitmap placeholder.
- */
-@Composable
-private fun TrackedChannelFeed(
-    connection: CpPlusDvrConnection,
-    channel: Int,
-    processor: FacePipeline,
-    logs: LogRepository,
-    onFrameProcessed: () -> Unit,
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val textureView = remember { TextureView(context) }
-    var videoWidth by remember { mutableStateOf(0) }
-    var videoHeight by remember { mutableStateOf(0) }
-
-    val player = remember(connection, channel) {
-        ExoPlayer.Builder(context).build().apply {
-            setMediaSource(connection.channelMediaSource(channel))
-            setVideoTextureView(textureView)
-            prepare()
-            playWhenReady = true
-        }
-    }
-
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onPlayerError(error: PlaybackException) {
-                android.util.Log.e("TRACKING_RTSP", "RTSP error channel $channel: ${error.message}")
-                scope.launch(Dispatchers.IO) { logs.addLog("Camera $channel tracking error: ${error.message}") }
-            }
-            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
-                videoWidth = videoSize.width
-                videoHeight = videoSize.height
-                android.util.Log.d("TRACKING_RTSP", "TRACKING_RTSP_OPEN_SUCCESS channel=$channel size=${videoSize.width}x${videoSize.height}")
-                scope.launch(Dispatchers.IO) { logs.addLog("TRACKING_RTSP_OPEN_SUCCESS channel=$channel") }
-            }
-        }
-        player.addListener(listener)
-        onDispose {
-            player.removeListener(listener)
-            player.release()
-        }
-    }
-
-    LaunchedEffect(player) {
-        delay(1000)
-        while (isActive) {
-            if (videoWidth > 0 && videoHeight > 0 && textureView.isAvailable) {
-                val maxDimension = 960
-                val scaleFactor = (maxDimension.toFloat() / maxOf(videoWidth, videoHeight)).coerceAtMost(1f)
-                val captureWidth = (videoWidth * scaleFactor).toInt().coerceAtLeast(1)
-                val captureHeight = (videoHeight * scaleFactor).toInt().coerceAtLeast(1)
-                val frame = runCatching { textureView.getBitmap(captureWidth, captureHeight) }.getOrNull()
-                if (frame != null) {
-                    withContext(Dispatchers.Default) { processor.processFrame(frame) }
-                    logs.addLog("Camera $channel frame processed (${captureWidth}x${captureHeight})")
-                    onFrameProcessed()
-                }
-            }
-            delay(2000)
-        }
-    }
-
-    Column {
-        Text("Camera $channel", style = MaterialTheme.typography.labelSmall)
-        AndroidView(
-            factory = { textureView },
-            modifier = Modifier.size(width = 120.dp, height = 68.dp)
-        )
     }
 }
